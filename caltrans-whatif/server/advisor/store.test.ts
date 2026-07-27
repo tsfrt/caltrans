@@ -20,7 +20,6 @@ import {
   listSessions,
   serialiseSession,
   type Db,
-  type SessionRow,
 } from './store.js';
 import { parseModelResponse, stripPartialFence } from './recommendations.js';
 import { RECOMMENDATION_FENCE } from './prompt.js';
@@ -77,12 +76,13 @@ describe('serialiseSession', () => {
   it('formats a pg Date from local parts, not toISOString', () => {
     // node-postgres parses DATE into a Date at local midnight. toISOString() would shift it
     // to the previous day for any negative UTC offset — i.e. for California.
-    const row = {
+    // Raw wire shape, exactly as node-postgres yields it — no assertion needed, because
+    // serialiseSession declares its input as the raw row type.
+    const out = serialiseSession({
       reading_date: new Date(2026, 5, 10),
       bucket_idx: '68',
       local_hour: '17',
-    } as unknown as SessionRow;
-    const out = serialiseSession(row);
+    });
     expect(out.reading_date).toBe('2026-06-10');
     // Counts arrive as strings from pg for some numeric types.
     expect(out.bucket_idx).toBe(68);
@@ -90,7 +90,7 @@ describe('serialiseSession', () => {
   });
 
   it('defaults a null KPI blob to an object so the UI can index it', () => {
-    const out = serialiseSession({ snapshot_kpis: null } as unknown as SessionRow);
+    const out = serialiseSession({ snapshot_kpis: null });
     expect(out.snapshot_kpis).toEqual({});
   });
 });

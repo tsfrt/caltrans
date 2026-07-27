@@ -105,15 +105,24 @@ function toDateString(v: unknown): string {
   return typeof v === 'number' ? String(v) : '';
 }
 
-/** Normalise a session row for the wire, so the client never sees a raw Date or a null KPI blob. */
-export function serialiseSession(row: SessionRow): SessionRow {
+/**
+ * Normalise a session row for the wire, so the client never sees a raw Date or a null KPI blob.
+ *
+ * The parameter is `QueryResultRowLike`, not `SessionRow`, because that is honestly what
+ * arrives: `pg` returns a DATE as a `Date`, SMALLINTs sometimes as strings, and a NULL jsonb
+ * as `null` — none of which match `SessionRow`'s declared field types. Declaring the input as
+ * the already-clean shape would be a lie that forces every caller (and every test) into an
+ * `as unknown as SessionRow` double assertion. This function IS the boundary where the raw
+ * wire shape becomes the declared one, so the widening belongs in its signature.
+ */
+export function serialiseSession(row: QueryResultRowLike): SessionRow {
   return {
     ...row,
     reading_date: toDateString(row.reading_date),
     bucket_idx: Number(row.bucket_idx),
     local_hour: Number(row.local_hour),
-    snapshot_kpis: row.snapshot_kpis ?? {},
-  };
+    snapshot_kpis: (row.snapshot_kpis as Record<string, unknown> | null) ?? {},
+  } as SessionRow;
 }
 
 const SESSION_COLUMNS = `

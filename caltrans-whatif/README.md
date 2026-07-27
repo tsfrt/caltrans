@@ -1,12 +1,16 @@
-# California Traffic What-If — Milestone 1
+# California Traffic What-If
+
+Animated geospatial UI over DBSQL, plus an **AI Congestion Advisor** that assesses the
+snapshot on screen and recommends congestion-relief actions, with the chat persisted in
+Lakebase. See [AI Congestion Advisor](#ai-congestion-advisor).
 
 Animated geospatial UI over DBSQL. One Pacific-local day of California freeway traffic
 (1,994 detector stations × 96 fifteen-minute buckets) rendered as a MapLibre + deck.gl map
 that animates entirely client-side.
 
-**Milestone 1 scope:** the thinnest end-to-end vertical slice that already demos animation
-+ geospatial. The what-if engine (M2) and persistence/narration (M3) are NOT built — see
-[Not done](#not-done-m2--m3).
+**Scope:** M1's animated baseline plus the AI advisor. The what-if *engine* (M2 — BPR volume
+delay, scenario levers, before/after deltas) is NOT built: the advisor recommends, it does not
+simulate. See [Not done](#not-done-m2).
 
 ---
 
@@ -19,6 +23,8 @@ that animates entirely client-side.
 | Data | `lanl.caltrans_traffic.gold_map_frames` (5,742,720 rows) + `silver_stations_geo` |
 | Compute | SQL warehouse `688f49c732cf9083` (Serverless Starter, Small, PRO, Photon) |
 | Animation | `requestAnimationFrame` clock over flat typed arrays — zero queries during playback |
+| LLM | Model Serving `databricks-claude-sonnet-5` (configurable — `valueFrom: serving-endpoint`) |
+| Chat storage | Lakebase Postgres 17.10, `projects/caltrans-app` / `production` |
 
 Streamlit was rejected: it re-runs the whole script per interaction, so a time slider
 cannot animate. See `docs/ARCHITECTURE.md` §2.1.
@@ -39,12 +45,25 @@ caltrans-whatif/
 │   ├── lib/useTrafficData.ts      # THE data-access seam (only place naming a queryKey)
 │   ├── lib/mapStyle.ts            # offline basemap style + optional CARTO
 │   ├── components/TrafficMap.tsx  # MapLibre + deck.gl layers
+│   ├── components/AdvisorPanel.tsx# chat panel (sibling of the map, collapsible)
+│   ├── lib/useAdvisor.ts          # advisor data seam + SSE transport negotiation
+│   ├── lib/advisorText.ts         # fence stripping + action labels
 │   ├── components/TimeControls.tsx
 │   ├── components/KpiPanel.tsx
 │   └── pages/map/TrafficMapPage.tsx
-├── server/server.ts              # analytics({ timeout: 45s }) + server()
+├── server/
+│   ├── server.ts                  # analytics + serving + lakebase + server plugins
+│   └── advisor/                   # AI Congestion Advisor (server side)
+│       ├── snapshot-sql.ts        #   4 DBSQL rollups of ONE bucket
+│       ├── context.ts             #   pure brief formatter (+ tests)
+│       ├── prompt.ts              #   system prompt + closed action vocabulary
+│       ├── model.ts               #   streaming + non-streaming transport
+│       ├── recommendations.ts     #   fenced-JSON parser (lenient shape, strict vocab)
+│       ├── store.ts               #   Lakebase persistence (+ tests)
+│       ├── routes.ts              #   /api/advisor/*
+│       └── selfprobe.ts           #   SSE-through-proxy diagnostic
 ├── app.yaml / databricks.yml     # warehouse bound CAN_USE via valueFrom
-└── tests/smoke.spec.ts           # Playwright smoke (selectors match THIS app)
+└── tests/smoke.spec.ts           # Playwright smoke (map + advisor selectors)
 ```
 
 ## The central performance rule
@@ -105,6 +124,226 @@ speed and v/c.
 
 **If a deployment has working `storage-proxy` egress, `ARROW_STREAM` becomes viable and
 these queries can be simplified back to row-per-record.**
+
+## AI Congestion Advisor
+
+Reads the snapshot **currently on the map**, assesses it with a Model Serving LLM, and
+recommends congestion-relief actions. The whole chat is persisted in Lakebase, anchored to the
+traffic state that produced it.
+
+Open it from the map's side panel ("Ask the AI Congestion Advisor"). It is a collapsible flex
+**sibling** of the map, never an overlay: opening it narrows the map so the animation and KPIs
+stay visible while you read the advice. Closed, the M1 layout is unchanged.
+
+### Snapshot-context strategy
+
+A snapshot is one 15-minute Pacific-local bucket — 1,994 stations at full resolution. Handing
+that to a model raw would be ~1,994 rows x ~15 fields, which it would neither read nor be able
+to cite reliably. So four rollups run **in parallel** in DBSQL and are rendered into one small
+labelled-text brief:
+
+| Rollup | Shape | Contents |
+|---|---|---|
+| network | 1 row | mean/min speed, mean+max v/c, stations over capacity, LOS-congested count, demanded vs served flow, mean delay/mi |
+| corridor | ≤8 rows | worst corridor-**directions** by mean delay per mile |
+| LOS | ≤6 rows | level-of-service histogram |
+| incidents | ≤12 rows | severity, lanes blocked, location, speed, v/c |
+
+**Measured: 4,338 bytes / 4,418 prompt tokens** for an all-corridor PM-peak snapshot;
+2,704 prompt tokens for a single corridor off-peak. DBSQL time for all four: **3.8 s** cold.
+
+Three deliberate choices in the brief:
+
+- **Ordered by delay per mile, not raw speed.** Delay normalises against each corridor's own
+  free-flow speed, so an urban corridor at 45 mph and a rural one at 45 mph are not treated as
+  equally broken.
+- **Unserved demand is pre-computed** (`demanded − served`, plus its share of demand).
+  Arithmetic is exactly what models get wrong, so it is done in code and labelled.
+- **A truncated incident list says so.** The network rollup supplies the true total, so 12
+  listed out of 55 can never read as "the network has 12 incidents".
+
+The queries live in `server/advisor/snapshot-sql.ts`, not `config/queries/`, because they are
+only ever consumed server-side on the way into a prompt — exposing them as client query keys
+would widen the app's public surface for no caller.
+
+### Prompt design
+
+The failure mode being defended against is not refusal — it is a confident, well-structured
+assessment containing numbers that are not in the data. Three mechanisms, in descending order
+of how much they actually help:
+
+1. **The context is small and complete.** Nothing else is retrievable, so there is nothing to
+   half-remember. This does most of the work.
+2. **An explicit citation rule with a stated fallback** — "when the data does not support a
+   recommendation, say so and name what you would need". A prohibition without an alternative
+   just gets ignored.
+3. **A fenced JSON block** whose fields are closed vocabularies, so a recommendation that does
+   not fit the schema surfaces as `other` rather than being silently reshaped.
+
+The system prompt states explicitly that the data is **synthetic** (told the network is real, a
+model blends real-world I-405 knowledge with the supplied numbers, and that blend is
+indistinguishable from a hallucination downstream), that **v/c is DEMAND-based** so `v/c > 1`
+is genuine oversaturation rather than a data error, that speeds are mph and times Pacific
+local, and that a single bucket is not a trend.
+
+### Real model output, with number verification
+
+`databricks-claude-sonnet-5`, snapshot `2026-06-10 17:00 PT`, all corridors:
+
+> This is a severe, network-wide PM peak breakdown, not an isolated event. 636 of 1,994
+> stations (31.9%) are at LOS F, mean v/c is 0.891 network-wide but every listed worst corridor
+> is oversaturated (v/c 0.94–1.27 mean), and total unserved demand is 1,093,916 veh/h (8.1% of
+> demand). 55 stations have active incidents […] notably I-680 S (severity 4, 4/6 lanes
+> blocked, speed 8.0 mph, v/c 4.01 at postmile 9.5) […]
+>
+> - **I-210 W** has no incident stations (0/52) yet 51/52 stations are over capacity with delay
+>   1.027 min/mi — this looks like pure recurrent demand saturation, not incident-driven, so
+>   incident clearance won't help here; only demand-management or metering is applicable.
+>
+> What I cannot support from this data: I have no ramp volumes, no queue lengths, no incident
+> duration/ETA, and no arterial/transit capacity data, so I can't size the effect of ramp
+> metering in mph or vehicles/hour […] I'm also not claiming any trend — this is one 15-minute
+> bucket.
+
+**Verification: all 42 distinct numeric tokens in that response appear verbatim in the
+supplied brief.** Checked mechanically by extracting every number-like token from the response
+and matching against the context — not by eye.
+
+On a free-flow snapshot (`03:00 PT`, I-210) it **correctly declines to recommend anything**,
+emits no recommendation block, and names the three things it would need. Its 16 numeric tokens
+also all trace to the brief, apart from `100` (from "LOS A: 104 (100.0%)") and `1.0` (the
+definitional v/c threshold, not a data claim).
+
+### Structured recommendations — the M2 seam
+
+Recommendations are rendered as cards, visually distinct from prose, and shredded into
+`app.advisor_recommendations` rows. `action_type` is CHECK-constrained to a closed vocabulary
+so M2 can switch on it exhaustively, and `scenario_id` is the (deliberately unconstrained)
+hook for "this recommendation became a scenario run".
+
+`magnitude` is nullable **and usually null** — the UI prints "not quantified" rather than
+hiding it, because forcing a number would invite the model to invent one, and M2 must not read
+a missing magnitude as zero. `target_corridor` NULL while `target_label` is set means the model
+named something unresolvable, which is exactly what M2 must refuse to auto-run.
+
+### Streaming is negotiated, not assumed
+
+The Apps platform guide says SSE "may be buffered" by the reverse proxy. Shipping a
+token-by-token UX that silently collapses into a 20-second blank screen in production is the
+exact failure mode to avoid, so the client **measures** instead of assuming: on load it calls
+`/api/advisor/diag/sse` (10 ticks, 300 ms apart) and decides on the **arrival spread** of the
+chunks — not the total duration, since a buffering proxy still takes ~2.7 s to deliver.
+
+| Verdict | Transport | UI |
+|---|---|---|
+| spread > 700 ms over >1 chunk | `POST … {stream:true}` | live deltas, `streaming` badge |
+| otherwise | `POST … {stream:false}` | determinate "consulting the model" state, `buffered` badge |
+
+Both paths persist identically and record `transport` per message. **Measured locally: 338
+incremental deltas over 18.7 s (TTFB 3.7 s) — genuine streaming.** Through the deployed proxy:
+see [Deployment](#deployment).
+
+### Why the built-in `/api/serving/stream` is not used
+
+AppKit's `serving()` plugin exposes two very different capability levels:
+
+- `AppKit.serving(alias).invoke(body)` — programmatic, server-side, returns `usage`.
+- `POST /api/serving/stream` — a **raw byte pipe**: `pipeline(Readable.fromWeb(rawStream), res)`
+  over *the client's own request body*. `exports()` returns `{ invoke, asUser }` only; there is
+  **no programmatic `stream()`**.
+
+So the built-in stream route cannot build the prompt server-side (the browser would have to
+supply it — and it does not even have the aggregates), cannot persist the reply (nothing in
+that path ever observes the text), and cannot record latency or tokens. Hence a custom
+streaming route over `getExecutionContext().client` + `apiClient.request({ raw: true })` — the
+same primitives the plugin uses internally. The plugin stays registered for `invoke()` and,
+importantly, for its **resource declaration**, which is what puts the `serving_endpoint`
+CAN_QUERY requirement into the bundle.
+
+### Model parameters: no `temperature`, no `top_p`
+
+Newer models on this workspace **reject** sampling parameters rather than ignoring them:
+
+```
+databricks-claude-sonnet-5  temperature -> BAD_REQUEST "does not support the temperature parameter"
+databricks-claude-sonnet-5  top_p       -> BAD_REQUEST "does not support sampling..."
+databricks-gpt-5-5          temperature -> "Unsupported value: 'temperature'..."
+databricks-claude-haiku-4-5 both        -> OK
+```
+
+Since the endpoint is operator-configurable via `app.yaml`, sending one would make the advisor
+fail hard on a perfectly valid model choice — at first use, not at deploy time. The request
+body carries only `messages`, `max_tokens`, `stream`.
+
+`max_tokens` is **3000**, raised from 1600 after a real all-corridor assessment came back
+`finish_reason: "length"` with the recommendation block cut mid-object (only 2 of the intended
+recommendations survived the parser's truncation salvage).
+
+### Latency and cost per assessment
+
+| Stage | All corridors, PM peak | One corridor, off-peak |
+|---|---|---|
+| DBSQL (4 rollups, parallel) | 3.8 s | 1.5 s |
+| Model TTFB | 3.7 s | — (non-streaming) |
+| Model total | 18.2 s | 9.6 s |
+| Prompt tokens | 4,418 | 2,704 |
+| Completion tokens | 1,600 (capped; now 3,000) | 531 |
+
+**~6k tokens per assessment**, dominated by the prompt. A follow-up turn costs the brief again
+(it must be replayed — it is the only place the numbers live) plus the transcript, so a long
+conversation grows linearly; there is no summarisation. Per-turn `prompt_tokens`,
+`completion_tokens`, and `latency_ms` are persisted on every message row, so cost is measured
+from the data rather than estimated.
+
+### Lakebase schema
+
+`lakebase/schema_advisor.sql` (idempotent; applied out of band, not from app startup).
+
+| Table | Purpose |
+|---|---|
+| `app.advisor_sessions` | One row per chat. Anchor (`reading_date`, `bucket_idx`, `local_hour`, `local_time`, `corridor`) **plus** `snapshot_kpis JSONB` — an immutable copy of the aggregates the model saw. |
+| `app.advisor_messages` | One row per turn: role, content, `model_endpoint`, token counts, `latency_ms`, `finish_reason`, `transport`, and the verbatim `recommendations JSONB`. Indexed `(session_id, created_at)`. |
+| `app.advisor_recommendations` | One row per discrete recommendation, FK to session + message, `ON DELETE CASCADE`. |
+
+**Why the snapshot is denormalised onto the session:** a recommendation is only meaningful
+against the traffic state that produced it. The underlying table is synthetic and can be
+regenerated, so re-deriving KPIs at read time would silently re-anchor an old chat to different
+numbers and the transcript would stop matching its own evidence.
+
+**Why recommendations are a table *and* a JSONB column:** the JSONB is the verbatim model
+payload; the rows exist because their consumer differs from the transcript's. M2 needs a stable
+per-recommendation identity to attach a scenario lifecycle to (you cannot FK to an element
+inside a JSONB array), and cross-session analytics is a `GROUP BY` over typed columns rather
+than an unnest of every message ever sent.
+
+Session create and message send also append to the existing `app.audit`.
+
+### ⚠️ The Lakebase resource binding is NOT sufficient — the SP also needs schema GRANTs
+
+`CAN_CONNECT_AND_CREATE` lets the app's service principal connect and create **its own**
+objects. It grants nothing on a schema someone else owns — and `app` was created by
+`thomas.seufert@databricks.com`, not the SP. Without `lakebase/grants_advisor.sql`, every
+advisor write fails with `permission denied for schema app` (SQLSTATE 42501) — **at runtime, in
+the deployed app only.** Local development runs as the schema owner and works perfectly, so the
+feature looks complete right up until it is deployed.
+
+Ordering matters, because the SP's Postgres role does not exist until the first deploy that
+attaches the `postgres` resource:
+
+```
+1. databricks apps deploy                     # provisions the SP's Postgres role
+2. psql -f lakebase/schema_advisor.sql
+3. psql -f lakebase/grants_advisor.sql
+4. GET /api/advisor/health  ->  "canWriteSessions": true
+```
+
+Verified after step 3 — all seven tables in `app` report `t` for SELECT/INSERT/UPDATE/DELETE by
+the SP, and schema USAGE + CREATE are granted. The grant file includes `GRANT USAGE, SELECT ON
+ALL SEQUENCES`, without which the *first audit write* fails on `audit_id_seq` — again only at
+runtime.
+
+`GET /api/advisor/health` reports the live answer via `has_table_privilege`, so this is
+checkable in any deployment rather than inferred from this one.
 
 ## Correctness verification
 
@@ -309,12 +548,43 @@ Separately, `postinstall: npm run typegen` was made non-fatal. Generated types a
 so regenerating them at install time is an optimisation; a missing grant should surface as a
 renderable query error in the UI rather than bricking startup before the server boots.
 
-**Not verified:** the deployed UI was not driven end-to-end from here. Databricks Apps sits
-behind an OIDC/SSO proxy and this environment has only PAT auth, so `GET /` returns the
-Databricks sign-in page and `POST /api/analytics/query/*` returns 401. All UI verification
-(screenshots, KPI values, no-refetch invariant) was done against the **local** dev server
-hitting the **same live warehouse**. `databricks apps logs` is likewise unavailable
-(`OAuth Token not supported for current auth type pat`).
+### ⚠️ SSE through the deployed proxy is UNVERIFIED
+
+The one question this milestone could not answer. Databricks Apps sits behind an OIDC/SSO proxy
+and this environment has only PAT auth, so `GET /` returns the sign-in page and `/api/*` returns
+**401 with or without a bearer token**; `databricks apps logs` also requires OAuth
+(`OAuth Token not supported for current auth type pat`). So no external client here can observe
+the deployed app's streaming behaviour.
+
+An in-app self-probe was built to close that gap from the inside
+(`server/advisor/selfprobe.ts`): the container mints an OAuth token from its injected
+`DATABRICKS_CLIENT_ID`/`SECRET`, calls its **own public URL** so the request traverses the real
+proxy, measures chunk arrival spread, and writes the verdict to `app.audit`. The mechanism works
+end to end — token minted, audit row written — but the verdict is:
+
+```json
+{"verdict":"unavailable","status":401,
+ "detail":"HTTP 401 — the proxy did not pass the request through"}
+```
+
+The app's own service principal holds no `CAN_USE` on the app, so the proxy rejects it.
+Granting it would rewrite the deployed app's permission ACL, which was outside the scope
+authorised for this change, so **it was not done and SSE-through-proxy remains unmeasured.**
+
+To finish the measurement, someone with app-admin rights should either grant the SP `CAN_USE`
+on `caltrans-whatif` and restart it (then read the audit row), or simply open the app in an
+SSO browser session and watch whether the advisor's text appears incrementally.
+
+**This is mitigated, not ignored.** The client never assumes streaming: it probes
+`/api/advisor/diag/sse` on load and falls back to non-streaming `invoke` with a determinate
+loading state, so a buffering proxy degrades to a slower-but-correct UX rather than a blank
+screen. The fallback path is **exercised and verified**, not merely written — see the off-peak
+assessment above, which ran with `transport: "invoke"` in 9.6 s.
+
+**Also not verified:** the deployed *UI* has still never been rendered by a browser, for the
+same auth reason. All UI verification (screenshots, streaming growth, history reload) was done
+against the **local** dev server hitting the **same live warehouse, the same serving endpoint,
+and the same Lakebase instance**.
 
 ## Resource binding
 
@@ -327,26 +597,28 @@ platform's 120 s ceiling. It is raised to 45 s in `server/server.ts` to absorb a
 cold start while still surfacing a slow query as a renderable AppKit error rather than an
 opaque proxy 504.
 
-## Not done (M2 / M3)
+## Not done (M2)
 
-Explicitly out of scope for this milestone:
+Explicitly out of scope:
 
-- **M2 — the what-if engine.** ✅ **Now built** — see
-  **[docs/WHATIF_ENGINE.md](docs/WHATIF_ENGINE.md)**. BPR volume-delay + damped incremental
-  (MSA) reassignment as one parameterized DBSQL query, all four scenario levers, and
-  before/after VHT/VMT/v/c/speed/delay/LOS deltas per station and per corridor.
-  `config/queries/scenario_time_matrix.sql` + `scenario_kpis.sql` (both **generated** from
-  `tools/scenario_sql/engine.py`), bound by `server/scenario/`. Still missing: the lever
-  **UI**, and `MAX_ITERS` is 4 even though the measured evidence says MSA has not converged
-  there — both listed in that doc's §8.
-- **M3 — persistence + narration.** Lakebase is *not* wired (the provisioned
-  `projects/caltrans-app` is untouched); no saved scenarios, no audit trail, no AI Gateway
-  narration.
-
-Seams left for them: all data access funnels through `client/src/lib/useTrafficData.ts`, the
-only module naming a `queryKey`, and `baseline_capacity_vph` / `baseline_lanes` are already
-in the geometry payload so the client can recompute v/c under a perturbed capacity without
-refetching.
+- **The what-if engine now exists** — BPR volume-delay + damped incremental (MSA)
+  reassignment as one parameterized DBSQL query, all four scenario levers, and before/after
+  VHT/VMT/v/c/speed/delay/LOS deltas per station and per corridor. See
+  **[docs/WHATIF_ENGINE.md](docs/WHATIF_ENGINE.md)**;
+  `config/queries/scenario_{time_matrix,kpis}.sql` are generated from
+  `tools/scenario_sql/engine.py` and bound by `server/scenario/`. Two caveats that matter:
+  `MAX_ITERS` is 4 even though the measured evidence says MSA has **not** converged there, and
+  **the advisor still recommends rather than simulates** — it is prompted to phrase effects as
+  reasoned expectations rather than computed predictions, so it cannot imply it ran the engine.
+- **Wiring the advisor to the engine.** The seam is in place on both sides —
+  `app.advisor_recommendations` carries action + target + magnitude + a null `scenario_id`, and
+  `server/scenario/contract.ts` is the request shape it would populate — but nothing consumes
+  it. `app.scenarios` / `app.scenario_runs` remain unused.
+- **No conversation summarisation.** The snapshot brief is replayed on every turn, so prompt
+  cost grows linearly with transcript length.
+- **No cross-snapshot comparison.** The advisor is told a single bucket is not a trend and
+  refuses to claim direction of change; comparing two snapshots would need a second brief and a
+  different prompt.
 
 ## Known weaknesses
 
@@ -386,3 +658,34 @@ refetching.
 - **The UC grant is a live change to shared infrastructure**, applied at the schema level to
   the app SP. It was required to make the app work at all, but reviewers should confirm it
   matches their access policy.
+- **SSE through the deployed proxy is unmeasured** (401 for the SP; ACL change not authorised).
+  The negotiated fallback means production cannot silently break, but whether deployed users get
+  token-by-token or a single blob is genuinely unknown. This is the biggest gap in this change.
+- **`x-forwarded-email` is trusted for identity.** Sessions are scoped by it, so it is also the
+  authorisation boundary. That header is injected by the Apps proxy and cannot be spoofed
+  through it, but the app does no verification of its own — running this off-platform, or behind
+  a misconfigured proxy, would make session isolation forgeable. There is no sharing model and
+  no row-level security.
+- **The advisor's own numbers were verified mechanically for two snapshots, not exhaustively.**
+  Zero hallucinated tokens across a PM-peak all-corridor assessment (42 distinct numbers) and an
+  off-peak single-corridor one (16). That is strong evidence, not a guarantee: the check is
+  string containment, so a number that appears in the brief but is *misattributed* to the wrong
+  corridor would pass. Spot-reading the two responses found no such misattribution, but no
+  automated check enforces it.
+- **The recommendation parser is lenient by design**, so a malformed block degrades to "prose
+  only" and the structured cards silently disappear. `finish_reason` and a server-side warn log
+  are the only signals; the UI does not tell the user a block failed to parse.
+- **Only one model was exercised end to end** (`databricks-claude-sonnet-5`). The endpoint is
+  configurable and the code avoids model-specific parameters, but the prompt's fenced-block
+  compliance is unverified on GPT-5.5 / Gemini / Haiku.
+- **The SSE self-probe adds a startup HTTP call** to the app's own public URL. It is
+  fire-and-forget and guarded, but it is a diagnostic shipped in production code, gated only by
+  `ADVISOR_SELF_URL`.
+- **`app.advisor_messages.content` is unbounded TEXT** and stores every assistant turn in full
+  alongside its brief. Nothing prunes old sessions.
+- **Both Lakebase migrations are applied by hand.** There is no migration runner and no schema
+  version table, so a deployment can run against a stale schema and fail at first write.
+- **A stale-window guard now silently drops mismatched payloads.** The corridor-switch crash is
+  fixed by filtering windows whose station/hex count disagrees with the current geometry. That
+  is correct, but if a genuine future bug made counts disagree permanently, the map would render
+  empty rather than throwing — quieter, and harder to notice.

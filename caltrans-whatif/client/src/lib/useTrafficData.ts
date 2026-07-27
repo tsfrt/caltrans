@@ -89,6 +89,9 @@ export function useStationGeometry() {
 /** Fixed window offsets: [0, 24, 48, 72]. */
 const WINDOW_OFFSETS = Array.from({ length: WINDOW_COUNT }, (_, i) => i * BUCKETS_PER_WINDOW);
 
+/** Query result array identity -> the view key it first arrived for. */
+const DATA_VIEW_KEYS = new WeakMap<readonly unknown[], string>();
+
 /**
  * Compose all reads into one animation-ready view.
  *
@@ -118,40 +121,31 @@ export function useTrafficView(day: string, freeway: string): TrafficView {
   // Stations participating in the current view, in station_idx order.
   const stations = useMemo(() => {
     if (!stationsQ.data) return null;
-    const scoped =
-      freeway === 'ALL' ? stationsQ.data : stationsQ.data.filter((s) => s.freeway === freeway);
+    const scoped = freeway === 'ALL' ? stationsQ.data : stationsQ.data.filter((s) => s.freeway === freeway);
     // station_geometry.sql already orders by station_id and filter preserves order, so
     // scoped[i] corresponds to station_idx === i. Sorting defensively costs little and
     // protects against a future edit dropping the ORDER BY.
     return [...scoped].sort((a, b) => (a.station_id < b.station_id ? -1 : 1));
   }, [stationsQ.data, freeway]);
 
-  const packedWindows = matrixWindows.map((q) => firstRow(q.data));
-  const packedHexWindows = hexWindows.map((q) => firstRow(q.data));
+  // The view key every in-flight read belongs to. Any window whose provenance is not
+  // exactly this string describes a DIFFERENT view and must not be aligned to `stations`.
+  const viewKey = `${day}|${freeway}`;
 
-  // Rebuild only when a new window actually arrives, not on every render.
-  //
-  // The key includes each window's STATION COUNT, not just its first bucket. On a corridor
-  // change the geometry narrows immediately (it is derived synchronously by filtering the
-  // cached all-corridor fetch) while the four matrix queries are still in flight, so for a
-  // render or two `packedWindows` still holds the PREVIOUS corridor's windows. Their
-  // first_bucket values are identical across corridors, so a bucket-only key did not change,
-  // the memo did not re-run, and 1,994-station windows were combined with 129-station
-  // geometry.
-  const matrixKey = packedWindows
-    .map((w) => (w ? `${w.first_bucket}:${w.stations}` : 'x'))
-    .join('|');
+  // Only windows proven to have been fetched FOR THE CURRENT VIEW. See useTaggedWindow for
+  // why provenance -- not a station count -- is the correct discriminator.
+  const packedWindows = matrixWindows.map((q) => (q.viewKey === viewKey ? firstRow(q.data) : null));
+  const packedHexWindows = hexWindows.map((q) => (q.viewKey === viewKey ? firstRow(q.data) : null));
+
+  // Rebuild only when a new window actually arrives, not on every render. The key is scoped
+  // by viewKey so switching corridor always invalidates the memo, even between two corridors
+  // whose payloads happen to look alike.
+  const matrixKey = `${viewKey}#${packedWindows.map((w) => (w ? w.first_bucket : 'x')).join('|')}`;
   const matrix = useMemo(() => {
     if (!stations || stations.length === 0) return null;
-    // Drop windows that do not describe the current station set. applyPackedWindow throws on
-    // a mismatch — correctly, since a silent mismatch would scramble which station shows
-    // which speed — but that throw escaped to the router's ErrorBoundary and blanked the
-    // entire page mid-corridor-switch. Filtering treats a stale window as "not arrived yet",
-    // which is exactly what it is.
-    const present = packedWindows.filter(
-      (w): w is PackedWindow => w !== null && Number(w.stations) === stations.length,
-    );
+    const present = packedWindows.filter((w): w is PackedWindow => w !== null);
     if (present.length === 0) return null;
+    assertStationSetAligned(present, stations.length, viewKey);
     const m = createFrameMatrix(stations.length);
     for (const win of present) applyPackedWindow(m, win);
     return m;
@@ -159,23 +153,21 @@ export function useTrafficView(day: string, freeway: string): TrafficView {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stations, matrixKey]);
 
-  // Same staleness hazard as the matrix, so the key carries hex_count too.
-  const hexKey = packedHexWindows
-    .map((w) => (w ? `${w.first_bucket}:${w.hex_count}` : 'x'))
-    .join('|');
+  const hexKey = `${viewKey}#${packedHexWindows.map((w) => (w ? w.first_bucket : 'x')).join('|')}`;
   const hexFrames = useMemo(() => {
     const present = packedHexWindows.filter((w): w is PackedHexWindow => w !== null);
     if (present.length === 0) return null;
     // The hex dictionary is identical across windows OF ONE CORRIDOR (hex_dim spans the whole
-    // day), so any window's copy defines the index space — but NOT across corridors, which
-    // have different cell sets. Unlike applyPackedWindow, applyPackedHexWindow has no
-    // built-in guard: it would silently write a stale corridor's congestion values into this
-    // corridor's cell indices, producing a plausible-looking but wrong map. So pin the index
-    // space to the first window present and drop any window that disagrees.
+    // day), so any window's copy defines the index space -- but NOT across corridors, which
+    // have different cell sets. Provenance filtering above guarantees every window here is
+    // from one corridor; a hex_count disagreement within that set would mean the four windows
+    // of ONE view disagree, which applyPackedHexWindow cannot detect on its own (unlike
+    // applyPackedWindow it has no built-in guard) and would silently write one cell's
+    // congestion into another's index. Fail LOUD rather than draw a plausible wrong map.
     const hexIds = present[0].hex_ids.split(',');
-    const consistent = present.filter((w) => Number(w.hex_count) === hexIds.length);
+    assertHexSetAligned(present, hexIds, viewKey);
     const frames = createHexFrames(hexIds);
-    for (const win of consistent) applyPackedHexWindow(frames, win);
+    for (const win of present) applyPackedHexWindow(frames, win);
     return frames;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hexKey]);
@@ -189,12 +181,89 @@ export function useTrafficView(day: string, freeway: string): TrafficView {
     stations,
     loading: allQueries.some((q) => q.loading),
     error,
-    // Counts windows that match the CURRENT station set, so a mid-corridor-switch render
-    // does not report the previous corridor's windows as already loaded.
-    windowsLoaded: stations
-      ? packedWindows.filter((w) => w !== null && Number(w.stations) === stations.length).length
-      : 0,
+    // Counts only windows belonging to the current view, so a mid-corridor-switch render does
+    // not report the previous corridor's windows as already loaded.
+    windowsLoaded: packedWindows.filter(Boolean).length,
   };
+}
+
+/**
+ * The view a window belongs to: `${day}|${freeway}`. Exported so the guard tests and the
+ * hook cannot drift apart on the format.
+ */
+export function trafficViewKey(day: string, freeway: string): string {
+  return `${day}|${freeway}`;
+}
+
+/**
+ * Throw if any window disagrees with the geometry about how many stations this view has.
+ *
+ * Reached ONLY after provenance filtering, so a disagreement here is NOT the benign
+ * mid-corridor-switch race -- it means traffic_time_matrix and station_geometry genuinely
+ * disagree about the station set for the SAME (day, freeway). Waiting cannot fix that, and
+ * aligning positionally anyway would attribute one station's speed to another while every
+ * individual value still looked plausible -- the same failure mode as the ARRAY_AGG trap.
+ * So this fails LOUD: the throw reaches ErrorBoundary, which renders the message and stack.
+ */
+export function assertStationSetAligned(
+  windows: readonly PackedWindow[],
+  stationCount: number,
+  viewKey: string,
+): void {
+  const mismatch = windows.find((w) => Number(w.stations) !== stationCount);
+  if (!mismatch) return;
+  throw new Error(
+    `STATION SET MISMATCH for view ${viewKey}: traffic_time_matrix window at bucket ` +
+      `${Number(mismatch.first_bucket)} reports ${Number(mismatch.stations)} stations but ` +
+      `station_geometry yields ${stationCount} for the same day+corridor. Refusing to align ` +
+      `station_idx -- positional alignment would mis-attribute every metric. Check that both ` +
+      `queries scope stations identically (EXISTS in gold_map_frames).`,
+  );
+}
+
+/** Same contract as assertStationSetAligned, for the hex index space. */
+export function assertHexSetAligned(
+  windows: readonly PackedHexWindow[],
+  hexIds: readonly string[],
+  viewKey: string,
+): void {
+  const mismatch = windows.find((w) => Number(w.hex_count) !== hexIds.length);
+  if (!mismatch) return;
+  throw new Error(
+    `HEX SET MISMATCH for view ${viewKey}: h3_congestion_hexes window at bucket ` +
+      `${Number(mismatch.first_bucket)} reports ${Number(mismatch.hex_count)} cells but the ` +
+      `window at bucket ${Number(windows[0].first_bucket)} defined ${hexIds.length}. hex_dim ` +
+      `must span the whole day so every window of one view shares an index space.`,
+  );
+}
+
+/**
+ * A window read tagged with the view it was actually fetched for.
+ *
+ * WHY PROVENANCE AND NOT A COUNT. On a corridor change `stations` narrows SYNCHRONOUSLY
+ * (it is derived by filtering the already-cached all-corridor geometry) while the eight
+ * window queries are still in flight. useAnalyticsQuery clears `data` to null from an
+ * effect, i.e. AFTER that render, so for one render the hook still returns the PREVIOUS
+ * corridor's rows next to the new corridor's geometry. Aligning those positionally is the
+ * M1 corridor-switch bug.
+ *
+ * Comparing station counts detects that only by luck. Scoped as station_geometry.sql scopes
+ * them, today's ten corridors happen to have distinct counts (I-680 75, I-880 77, I-210 104,
+ * I-405 129, I-80 165, SR-99 169, I-15 178, I-10 215, US-101 379, I-5 503) -- but in raw
+ * silver_stations_geo I-80 and SR-99 are BOTH exactly 170, so one upstream row change
+ * collapses the guard and it fails silently, drawing I-80's congestion on SR-99's stations.
+ *
+ * So this hook records which (day, freeway) each `data` object arrived for and exposes it as
+ * `viewKey`. The caller keeps a window only when that tag equals the view it is rendering,
+ * which is a statement about identity rather than about a coincidence of cardinality.
+ */
+function useTaggedWindow<T>(
+  result: { data: readonly T[] | null; loading: boolean; error: string | null },
+  viewKey: string,
+): { data: readonly T[] | null; loading: boolean; error: string | null; viewKey: string } {
+  if (result.data === null) return { ...result, viewKey };
+  if (!DATA_VIEW_KEYS.has(result.data)) DATA_VIEW_KEYS.set(result.data, viewKey);
+  return { ...result, viewKey: DATA_VIEW_KEYS.get(result.data) ?? viewKey };
 }
 
 function useMatrixWindow(day: string, freeway: string, fromBucket: number) {
@@ -204,9 +273,9 @@ function useMatrixWindow(day: string, freeway: string, fromBucket: number) {
       freeway: sql.string(freeway),
       from_bucket: sql.int(fromBucket),
     }),
-    [day, freeway, fromBucket],
+    [day, freeway, fromBucket]
   );
-  return useAnalyticsQuery('traffic_time_matrix', params);
+  return useTaggedWindow(useAnalyticsQuery('traffic_time_matrix', params), `${day}|${freeway}`);
 }
 
 function useHexWindow(day: string, freeway: string, fromBucket: number) {
@@ -216,9 +285,9 @@ function useHexWindow(day: string, freeway: string, fromBucket: number) {
       freeway: sql.string(freeway),
       from_bucket: sql.int(fromBucket),
     }),
-    [day, freeway, fromBucket],
+    [day, freeway, fromBucket]
   );
-  return useAnalyticsQuery('h3_congestion_hexes', params);
+  return useTaggedWindow(useAnalyticsQuery('h3_congestion_hexes', params), `${day}|${freeway}`);
 }
 
 /**

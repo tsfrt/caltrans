@@ -9,6 +9,8 @@ import { CARTO_DARK_STYLE, INITIAL_VIEW_STATE, OFFLINE_STYLE } from '../lib/mapS
 import { frameSlice, speedToColor, type FrameMatrix, type HexFrames } from '../lib/frames';
 import type { StationRow } from '../lib/useTrafficData';
 
+export type MapScenarioMode = 'baseline' | 'scenario' | 'diff';
+
 interface HexCell {
   hexId: string;
   /** 0..1 congestion index for this hex in the current bucket */
@@ -20,6 +22,7 @@ interface HexCell {
 export interface TrafficMapProps {
   stations: StationRow[];
   matrix: FrameMatrix;
+  baselineMatrix?: FrameMatrix | null;
   hexFrames: HexFrames | null;
   /** Fractional bucket position from the animation clock. */
   position: number;
@@ -27,6 +30,7 @@ export interface TrafficMapProps {
   showStations: boolean;
   showCorridors: boolean;
   useExternalBasemap: boolean;
+  scenarioMode: MapScenarioMode;
 }
 
 /**
@@ -40,12 +44,14 @@ export interface TrafficMapProps {
 export function TrafficMap({
   stations,
   matrix,
+  baselineMatrix,
   hexFrames,
   position,
   showHexes,
   showStations,
   showCorridors,
   useExternalBasemap,
+  scenarioMode,
 }: TrafficMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
@@ -160,6 +166,16 @@ export function TrafficMap({
     return { speed, flow, vc, incident };
   }, [matrix, position]);
 
+  const baselineFrame = useMemo(() => {
+    if (!baselineMatrix || scenarioMode !== 'diff') return null;
+    const { stationCount, bucketCount } = baselineMatrix;
+    const bucket = Math.floor(position) % bucketCount;
+    return {
+      speed: frameSlice(baselineMatrix.speed, bucket, stationCount),
+      vc: frameSlice(baselineMatrix.vc, bucket, stationCount),
+    };
+  }, [baselineMatrix, position, scenarioMode]);
+
   // Hex cells for the current frame, read out of the day-wide typed arrays. Cells with no
   // data in this bucket (NaN, the -1 SQL sentinel) are dropped rather than drawn as
   // free-flowing.
@@ -196,7 +212,7 @@ export function TrafficMap({
           widthUnits: 'pixels',
           widthMinPixels: 1,
           pickable: false,
-        }),
+        })
       );
     }
 
@@ -228,7 +244,7 @@ export function TrafficMap({
             getFillColor: hexCells,
             getElevation: [hexCells, elevationDenominator],
           },
-        }),
+        })
       );
     }
 
@@ -241,19 +257,51 @@ export function TrafficMap({
             attributes: { getPosition: { value: positions, size: 2 } },
           },
           getFillColor: (_: unknown, { index }: { index: number }) => {
+            if (scenarioMode === 'diff' && baselineFrame) {
+              const delta = frame.speed[index] - baselineFrame.speed[index];
+              const magnitude = Math.min(1, Math.abs(delta) / 18);
+              if (delta < -0.25) return [235, 22, 0, Math.round(120 + magnitude * 120)];
+              if (delta > 0.25) return [16, 185, 129, Math.round(120 + magnitude * 120)];
+              return [148, 163, 184, 120];
+            }
             const [r, g, b] = speedToColor(frame.speed[index]);
             return [r, g, b, 230];
           },
           // Radius by flow so rush hour visibly blooms, not just recolours.
-          getRadius: (_: unknown, { index }: { index: number }) =>
-            600 + Math.sqrt(Math.max(0, frame.flow[index])) * 55,
+          getRadius: (_: unknown, { index }: { index: number }) => 600 + Math.sqrt(Math.max(0, frame.flow[index])) * 55,
           radiusUnits: 'meters',
           radiusMinPixels: 1.5,
           radiusMaxPixels: 14,
           pickable: true,
           updateTriggers: { getFillColor: position, getRadius: position },
-        }),
+        })
       );
+
+      if (scenarioMode === 'diff' && baselineFrame) {
+        const regressionRows: Array<{ position: [number, number]; delta: number }> = [];
+        for (let i = 0; i < stations.length; i++) {
+          const delta = frame.speed[i] - baselineFrame.speed[i];
+          if (delta < -8) {
+            regressionRows.push({ position: [stations[i].longitude, stations[i].latitude], delta });
+          }
+        }
+        if (regressionRows.length > 0) {
+          out.push(
+            new ColumnLayer({
+              id: 'scenario-speed-regressions',
+              data: regressionRows,
+              getPosition: (d: { position: [number, number] }) => d.position,
+              getFillColor: [235, 22, 0, 210],
+              getElevation: (d: { delta: number }) => Math.min(30000, Math.abs(d.delta) * 1800),
+              radius: 1700,
+              extruded: true,
+              diskResolution: 10,
+              pickable: true,
+              updateTriggers: { getElevation: position },
+            })
+          );
+        }
+      }
 
       // Incident stations: a distinct extruded column, so they read as events rather than
       // just another dot in the congestion ramp.
@@ -284,7 +332,7 @@ export function TrafficMap({
             diskResolution: 12,
             pickable: true,
             updateTriggers: { getElevation: position, getFillColor: position },
-          }),
+          })
         );
       }
     }
@@ -296,11 +344,13 @@ export function TrafficMap({
     stations,
     positions,
     frame,
+    baselineFrame,
     position,
     showHexes,
     showStations,
     showCorridors,
     elevationDenominator,
+    scenarioMode,
   ]);
 
   // Push layers to the existing overlay. This is the only per-frame work.

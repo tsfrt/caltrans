@@ -1,0 +1,32 @@
+bundle:
+  name: caltrans-whatif
+
+variables:
+  sql_warehouse_id:
+    description: SQL Warehouse ID
+
+resources:
+  apps:
+    app:
+      name: "caltrans-whatif"
+      description: "California traffic what-if modeling: animated geospatial map over DBSQL"
+      source_code_path: ./
+      # Uncomment to enable on behalf of user API scopes. Available scopes: sql, dashboards.genie, files.files, serving.serving-endpoints
+      # user_api_scopes:
+      #   - sql
+
+      # The resources which this app has access to.
+      resources:
+        - name: sql-warehouse
+          sql_warehouse:
+            id: ${var.sql_warehouse_id}
+            permission: CAN_USE
+
+targets:
+  default:
+    default: true
+    workspace:
+      host: https://fevm-serverless-stable-blj52t.cloud.databricks.com
+
+    variables:
+      sql_warehouse_id: 688f49c732cf9083

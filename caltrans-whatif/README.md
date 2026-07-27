@@ -226,6 +226,57 @@ npx playwright test tests/smoke.spec.ts
 
 Requires a Databricks CLI profile with access to the warehouse; see `.env.example`.
 
+## Deployment
+
+Deployed and **RUNNING**: <https://caltrans-whatif-7474656503943141.aws.databricksapps.com>
+
+```
+app_status:        RUNNING   ("App is running")
+compute_status:    ACTIVE
+active_deployment: SUCCEEDED ("App started successfully")
+```
+
+### ⚠️ The warehouse binding is NOT sufficient — the SP also needs UC grants
+
+`databricks.yml` auto-grants the app service principal `CAN_USE` on the **warehouse**, but
+that says nothing about **Unity Catalog data access**. The first deploy therefore failed
+outright:
+
+```
+Error: Type generation failed: 5 queries could not be described:
+available_days, corridor_options, h3_congestion_hexes, station_geometry,
+traffic_time_matrix.
+```
+
+All five failing — including the trivial `corridor_options` — is the signature of a
+permissions problem, not SQL syntax. `SHOW GRANTS ON SCHEMA lanl.caltrans_traffic` listed no
+`SELECT` for any principal but the owner. Fix, scoped to just this app's SP:
+
+```sql
+GRANT USE SCHEMA ON SCHEMA lanl.caltrans_traffic TO `<app-service-principal-client-id>`;
+GRANT SELECT     ON SCHEMA lanl.caltrans_traffic TO `<app-service-principal-client-id>`;
+```
+
+Get the client ID from `databricks apps get <app> -o json | jq -r .service_principal_client_id`.
+(`lanl` already grants `USE CATALOG` to `account users`, so no catalog-level grant was
+needed here.)
+
+After the grants, the deploy succeeded. That success is itself the proof the SP can read the
+data: `prebuild` runs `appkit generate-types`, which is **fatal** and issues
+`DESCRIBE QUERY` for all five queries using the SP's own credentials — so
+`Building app... → App started successfully` cannot happen unless every query resolves.
+
+Separately, `postinstall: npm run typegen` was made non-fatal. Generated types are committed,
+so regenerating them at install time is an optimisation; a missing grant should surface as a
+renderable query error in the UI rather than bricking startup before the server boots.
+
+**Not verified:** the deployed UI was not driven end-to-end from here. Databricks Apps sits
+behind an OIDC/SSO proxy and this environment has only PAT auth, so `GET /` returns the
+Databricks sign-in page and `POST /api/analytics/query/*` returns 401. All UI verification
+(screenshots, KPI values, no-refetch invariant) was done against the **local** dev server
+hitting the **same live warehouse**. `databricks apps logs` is likewise unavailable
+(`OAuth Token not supported for current auth type pat`).
+
 ## Resource binding
 
 The warehouse ID is **never hardcoded in source**. `databricks.yml` declares it with
@@ -274,3 +325,10 @@ refetching.
   Not tested on real GPU hardware or in Safari/Firefox.
 - **H3 hexagons and stations overlap visually.** With both layers on, the hexagons can
   obscure station detail at high zoom; there is no automatic zoom-based layer switching.
+- **The hosted app's UI is unverified.** Deployment state is RUNNING and the SP provably can
+  describe/read every query, but no browser has actually loaded the deployed page — PAT auth
+  cannot pass the Apps SSO proxy from this environment. Someone with SSO should open the URL
+  and confirm the map renders there as it does locally.
+- **The UC grant is a live change to shared infrastructure**, applied at the schema level to
+  the app SP. It was required to make the app work at all, but reviewers should confirm it
+  matches their access policy.

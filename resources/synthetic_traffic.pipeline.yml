@@ -1,0 +1,35 @@
+resources:
+  pipelines:
+    synthetic_traffic:
+      name: "[${bundle.target}] caltrans_synthetic_traffic"
+
+      catalog: ${var.catalog}
+      schema: ${var.schema}
+
+      # Serverless: this pipeline needs no R, RDD APIs or JAR libraries.
+      serverless: true
+      channel: CURRENT
+
+      # The caltrans_traffic package lives directly under root_path, which SDP
+      # puts on sys.path for every transformation module. This is why the
+      # `from caltrans_traffic import ...` imports resolve without any pip
+      # install. An `environment.dependencies: [--editable ...]` install was
+      # tried first and failed on serverless pipeline compute (the build
+      # backend could not be fetched), so the package ships as plain source.
+      root_path: ../pipelines/synthetic_traffic
+      libraries:
+        - glob:
+            include: ../pipelines/synthetic_traffic/transformations/**
+
+      # Triggered, not continuous: this is a generated dataset that is rebuilt
+      # on demand, not a stream to tail.
+      continuous: false
+
+      configuration:
+        target_catalog: ${var.catalog}
+        target_schema: ${var.schema}
+        spark.sql.shuffle.partitions: auto
+
+      permissions:
+        - level: CAN_VIEW
+          group_name: users

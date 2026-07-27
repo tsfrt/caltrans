@@ -1,0 +1,46 @@
+[project]
+name = "caltrans-traffic"
+version = "0.1.0"
+description = "Synthetic California traffic generation model for the what-if modeling app"
+requires-python = ">=3.10"
+# The generation model deliberately depends only on the standard library, so it
+# installs instantly on serverless compute and the unit tests need no extras.
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.4",
+  "ruff>=0.5",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+# The package lives under the pipeline root_path so that SDP serverless compute
+# picks it up via sys.path without needing a pip install. Tests import it from
+# there too, via the pythonpath setting below.
+packages = ["pipelines/synthetic_traffic/caltrans_traffic"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = [".venv", ".databricks", ".claude", ".agents", ".ai-dev-kit", ".codex"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+# zip() without strict= is used deliberately for sliding-window pairs
+# (zip(xs, xs[1:])), where the length mismatch is the point.
+ignore = ["B905"]
+
+[tool.ruff.lint.per-file-ignores]
+# SDP transformation files use `spark`, injected into the module namespace by
+# the pipeline runtime rather than imported.
+"pipelines/**" = ["F821"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Import caltrans_traffic from its in-pipeline location, mirroring how SDP
+# resolves it on the cluster, so the tests cover the code that actually runs.
+pythonpath = ["pipelines/synthetic_traffic"]

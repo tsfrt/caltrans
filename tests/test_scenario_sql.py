@@ -138,12 +138,18 @@ def test_base_excess_is_carried_through_every_iteration() -> None:
     failed. Measured before the fix.
     """
     body = E.engine_sql()
+    # Seeded once from the observed data...
     assert "greatest(0.0, demand_obs - cap_obs) AS base_excess" in body
-    for k in range(1, E.MAX_ITERS + 1):
-        assert body.count("- p.base_excess) AS my_excess") >= 1
-    # And it must survive each iteration's projection, or later iterations would
-    # start relitigating the baseline.
+    # ...subtracted in EVERY iteration's divertible-excess term...
+    assert body.count("- p.base_excess) AS my_excess") == E.MAX_ITERS
+    # ...and carried through every iteration's projection, or later iterations
+    # would start relitigating the baseline again.
     assert body.count("MAX(base_excess) AS base_excess") == E.MAX_ITERS
+    for k in range(1, E.MAX_ITERS + 1):
+        assert "- p.base_excess) AS my_excess" in _iteration_block(k), (
+            f"iteration {k} reassigns pre-existing congestion, not just the "
+            f"scenario's own excess"
+        )
 
 
 def test_scenario_solves_over_all_corridors() -> None:
@@ -263,18 +269,27 @@ def test_network_scope_ignores_the_corridor_filter() -> None:
     assert "corridor_scoped" not in net
 
 
+def _sql_only(text: str) -> str:
+    """Strip `--` comments, so prose that mentions `:something` is not scanned."""
+    return re.sub(r"--[^\n]*", "", text)
+
+
 def test_every_declared_parameter_is_actually_used() -> None:
     """A documented-but-unbound parameter is a lever that silently does nothing."""
-    body = E.engine_sql()
-    combined = body + "".join(RENDERED.values())
+    combined = _sql_only(E.engine_sql() + "".join(RENDERED.values()))
     for name, _sql_type, _doc in E.PARAMS:
         assert f":{name}" in combined, f"parameter :{name} is declared but never referenced"
 
 
 def test_no_undeclared_parameters() -> None:
-    """The server module binds exactly PARAMS; anything else fails at runtime."""
+    """Anything the SQL references but the server does not bind fails at runtime.
+
+    DBSQL rejects a partially-bound statement with UNBOUND_SQL_PARAMETER (42P02),
+    so an undeclared `:name` is not a default -- it is a hard failure on every
+    request.
+    """
     declared = {name for name, _t, _d in E.PARAMS}
-    used = set(re.findall(r":([a-z_][a-z0-9_]*)", "".join(RENDERED.values())))
+    used = set(re.findall(r":([a-z_][a-z0-9_]*)", _sql_only("".join(RENDERED.values()))))
     assert used <= declared, f"SQL uses undeclared parameters: {sorted(used - declared)}"
 
 
@@ -312,3 +327,48 @@ def test_engine_bpr_defaults_follow_the_generator_not_the_textbook() -> None:
     # about it stays true.
     seed = (REPO_ROOT / "lakebase" / "schema.sql").read_text()
     assert "'bpr_alpha'" in seed and "'0.15'" in seed
+
+
+def test_param_annotations_exist_for_every_parameter() -> None:
+    """AppKit typegen cannot describe a query without them.
+
+    `DESCRIBE QUERY` rejects bound parameters (UNBOUND_SQL_PARAMETER, 42P02), so
+    AppKit textually substitutes each `:name` with a literal whose type it reads
+    from a `-- @param name TYPE` comment. A missing annotation means typegen
+    fails with "queries could not be described" and the app cannot build --
+    verified: both queries failed exactly that way before the block was added.
+    """
+    annotated = {"STRING", "INT", "DOUBLE", "DATE", "BIGINT", "BOOLEAN", "TIMESTAMP"}
+    for name, sql in RENDERED.items():
+        found = dict(re.findall(r"--\s*@param\s+(\w+)\s+(\w+)", sql))
+        for pname, ptype, _doc in E.PARAMS:
+            assert pname in found, f"{name} is missing `-- @param {pname} {ptype}`"
+            assert found[pname] == ptype, (
+                f"{name}: @param {pname} is annotated {found[pname]}, expected {ptype}"
+            )
+            assert ptype in annotated, f"{ptype} is not a type AppKit typegen recognises"
+
+
+def test_generated_typescript_row_types_match_the_hand_written_contract() -> None:
+    """`server/scenario/contract.ts` must describe the columns the SQL returns.
+
+    The contract types are hand-written (they are the seam the lever UI codes
+    against and needed to exist before typegen could run). Typegen has since been
+    run against the live warehouse, so the two can be compared -- and must be, or
+    the UI is typed against a shape the query does not produce.
+    """
+    generated = (
+        REPO_ROOT / "caltrans-whatif" / "shared" / "appkit-types" / "analytics.d.ts"
+    ).read_text()
+    contract = (
+        REPO_ROOT / "caltrans-whatif" / "server" / "scenario" / "contract.ts"
+    ).read_text()
+
+    for query in ("scenario_time_matrix", "scenario_kpis"):
+        block = generated.split(f"{query}: {{", 1)[1].split("result: Array<{", 1)[1]
+        columns = re.findall(r"^\s{10}(\w+)[?]?:", block[: block.index("\n        }>")], re.M)
+        assert columns, f"no result columns found for {query} in analytics.d.ts"
+        for column in columns:
+            assert re.search(rf"^\s*{column}[?]?:", contract, re.M), (
+                f"{query} returns column `{column}` but contract.ts does not declare it"
+            )

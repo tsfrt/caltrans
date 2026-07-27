@@ -24,7 +24,7 @@ QUERY_DIR = REPO_ROOT / "caltrans-whatif" / "config" / "queries"
 # scenario_time_matrix.sql — the map payload
 # ---------------------------------------------------------------------------
 
-_MATRIX_DOC = f"""\
+_MATRIX_DOC = """\
 --
 -- ── This file's job: the SCENARIO animation payload ─────────────────────────
 -- Drop-in replacement for traffic_time_matrix.sql, and a SUPERSET of its client
@@ -231,8 +231,11 @@ def render_kpis() -> str:
     SUM(capacity_before_vph) AS capacity_before_vph,
     SUM(capacity_after_vph)  AS capacity_after_vph"""
 
-    network = agg("NETWORK", "'ALL' AS freeway,\n    'ALL' AS direction,\n    CAST(NULL AS INT) AS bucket_idx")
-    corridor = agg("CORRIDOR", "freeway,\n    direction,\n    CAST(NULL AS INT) AS bucket_idx")
+    # NETWORK has no real freeway/direction/bucket, but every UNION arm must
+    # project the same column list, so it emits literals in those positions.
+    no_bucket = "CAST(NULL AS INT) AS bucket_idx"
+    network = agg("NETWORK", f"'ALL' AS freeway,\n    'ALL' AS direction,\n    {no_bucket}")
+    corridor = agg("CORRIDOR", f"freeway,\n    direction,\n    {no_bucket}")
     segment = agg("SEGMENT", "freeway,\n    direction,\n    bucket_idx")
 
     return f"""{E.header("SCENARIO KPIs (before/after panel)")}{_KPI_DOC}{E.engine_sql()},

@@ -800,5 +800,37 @@ def engine_sql() -> str:
     return "WITH " + "\n".join(parts)
 
 
+def param_doc_block() -> str:
+    """The `-- @param name TYPE` block AppKit's typegen requires.
+
+    These annotations are not decoration. `appkit generate-types` runs
+    `DESCRIBE QUERY` to derive TypeScript row types, and DESCRIBE cannot accept
+    bound parameters -- it fails with `UNBOUND_SQL_PARAMETER` (SQLSTATE 42P02).
+    AppKit works around that by textually substituting each `:name` with a
+    type-appropriate literal, which it can only do for parameters it knows the
+    type of, from exactly this annotation syntax
+    (`appkit/dist/type-generator/query-registry.js`, `extractParameterTypes`).
+    Without the block, typegen fails with "queries could not be described" and
+    the app cannot build.
+
+    One consequence worth knowing: typegen substitutes `''` for every STRING and
+    `0` for every INT, so it describes the query with every lever OFF. That is
+    fine -- the returned COLUMNS do not depend on the parameter values -- but it
+    means typegen exercises only the baseline code path.
+    """
+    width = max(len(name) for name, _t, _d in PARAMS)
+    lines = [
+        "--",
+        "-- ── Parameters ───────────────────────────────────────────────────────────────",
+        "-- Required by AppKit typegen (see tools/scenario_sql/engine.py:param_doc_block).",
+        "-- Every lever is OFF at its sentinel: '' freeway, 0 lanes, 0 percent, 1.0 scale,",
+        "-- -1 absolute override. All-sentinel is the provable no-op.",
+    ]
+    for name, sql_type, doc in PARAMS:
+        lines.append(f"-- @param {name.ljust(width)} {sql_type}")
+        lines.append(f"--   {doc}")
+    return "\n".join(lines) + "\n"
+
+
 def header(title: str) -> str:
-    return _HEADER.format(title=title)
+    return _HEADER.format(title=title) + param_doc_block()

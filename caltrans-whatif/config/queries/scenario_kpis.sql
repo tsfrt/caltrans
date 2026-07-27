@@ -66,6 +66,77 @@
 --  optimiser, so latency really does fall when you ask for fewer.
 -- ══════════════════════════════════════════════════════════════════════════════
 --
+-- ── Parameters ───────────────────────────────────────────────────────────────
+-- Required by AppKit typegen (see tools/scenario_sql/engine.py:param_doc_block).
+-- Every lever is OFF at its sentinel: '' freeway, 0 lanes, 0 percent, 1.0 scale,
+-- -1 absolute override. All-sentinel is the provable no-op.
+-- @param day                       DATE
+--   Pacific-local reading_date to model. Required.
+-- @param freeway                   STRING
+--   'ALL' or a freeway name. OUTPUT filter only -- the engine always solves over all 10 corridors so diversion targets exist.
+-- @param from_bucket               INT
+--   First 15-minute bucket index (0..95, Pacific local) of the 24-bucket output window. Time matrix only.
+-- @param bpr_alpha                 DOUBLE
+--   BPR alpha. 0.55 to match the data generator.
+-- @param bpr_beta                  DOUBLE
+--   BPR beta. 4.5 to match the data generator.
+-- @param msa_iterations            INT
+--   0..4. 0 disables reassignment entirely.
+-- @param close_freeway             STRING
+--   '' disables the lane-closure lever.
+-- @param close_direction           STRING
+--   '' = both directions.
+-- @param close_pm_from             DOUBLE
+--   Closure postmile window start.
+-- @param close_pm_to               DOUBLE
+--   Closure postmile window end.
+-- @param close_lanes               INT
+--   Lanes to close. 0 disables.
+-- @param demand_freeway            STRING
+--   '' disables the demand lever. 'ALL' = every corridor.
+-- @param demand_direction          STRING
+--   '' = both directions.
+-- @param demand_pct                DOUBLE
+--   Percent demand change, e.g. 20 = +20%, -15 = -15%. 0 disables.
+-- @param incident_freeway          STRING
+--   '' disables the incident lever.
+-- @param incident_direction        STRING
+--   '' = both directions.
+-- @param incident_pm_from          DOUBLE
+--   Incident postmile window start.
+-- @param incident_pm_to            DOUBLE
+--   Incident postmile window end.
+-- @param incident_lanes_blocked    INT
+--   Lanes blocked by the injected incident. 0 disables.
+-- @param incident_from_bucket      INT
+--   First bucket (0..95) the incident is active.
+-- @param incident_to_bucket        INT
+--   Last bucket (0..95) the incident is active, inclusive.
+-- @param capacity_freeway          STRING
+--   '' disables all three capacity levers.
+-- @param capacity_direction        STRING
+--   '' = both directions.
+-- @param capacity_pm_from          DOUBLE
+--   Capacity-lever postmile window start.
+-- @param capacity_pm_to            DOUBLE
+--   Capacity-lever postmile window end.
+-- @param capacity_add_lanes        INT
+--   Lanes to ADD (negative removes). 0 = no change.
+-- @param capacity_scale            DOUBLE
+--   Multiplier on effective capacity. 1.0 = no change.
+-- @param capacity_abs_vph          DOUBLE
+--   Absolute effective-capacity override in vph. -1 = no override. Applied last.
+-- @param reassign_share            DOUBLE
+--   Fraction of over-capacity demand that is willing to re-route at all (0..1). 0 disables diversion.
+-- @param reassign_offnetwork_share DOUBLE
+--   Of the willing share, the fraction that leaves the modelled freeway network entirely (local arterials, not in the data). 0..1.
+-- @param parallel_max_dist_m       DOUBLE
+--   Max ST_DistanceSphere metres to a parallel-corridor diversion target.
+-- @param parallel_max_bearing_deg  DOUBLE
+--   Max heading difference (degrees) for a parallel-corridor target to count as 'parallel'.
+-- @param worst_n                   INT
+--   Rows in the worst-segment list. KPI query only.
+--
 -- ── This file's job: the KPI panel ─────────────────────────────────────────
 -- One row per scope, all from the SAME engine as scenario_time_matrix.sql (both
 -- files are generated from tools/scenario_sql/engine.py, and a test fails if

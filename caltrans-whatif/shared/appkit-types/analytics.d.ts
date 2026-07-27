@@ -56,6 +56,246 @@ declare module "@databricks/appkit-ui/react" {
           speed_half: string;
         }>;
       };
+    scenario_kpis: {
+        name: "scenario_kpis";
+        parameters: {
+          /** DATE - use sql.date() */
+          day: SQLDateMarker;
+          /** STRING - use sql.string() */
+          capacity_freeway: SQLStringMarker;
+          /** STRING - use sql.string() */
+          capacity_direction: SQLStringMarker;
+          /** DOUBLE - use sql.double() */
+          capacity_pm_from: SQLNumberMarker;
+          /** DOUBLE - use sql.double() */
+          capacity_pm_to: SQLNumberMarker;
+          /** INT - use sql.int() */
+          capacity_add_lanes: SQLNumberMarker;
+          /** STRING - use sql.string() */
+          close_freeway: SQLStringMarker;
+          /** STRING - use sql.string() */
+          close_direction: SQLStringMarker;
+          /** DOUBLE - use sql.double() */
+          close_pm_from: SQLNumberMarker;
+          /** DOUBLE - use sql.double() */
+          close_pm_to: SQLNumberMarker;
+          /** INT - use sql.int() */
+          close_lanes: SQLNumberMarker;
+          /** STRING - use sql.string() */
+          incident_freeway: SQLStringMarker;
+          /** STRING - use sql.string() */
+          incident_direction: SQLStringMarker;
+          /** DOUBLE - use sql.double() */
+          incident_pm_from: SQLNumberMarker;
+          /** DOUBLE - use sql.double() */
+          incident_pm_to: SQLNumberMarker;
+          /** INT - use sql.int() */
+          incident_from_bucket: SQLNumberMarker;
+          /** INT - use sql.int() */
+          incident_to_bucket: SQLNumberMarker;
+          /** INT - use sql.int() */
+          incident_lanes_blocked: SQLNumberMarker;
+          /** DOUBLE - use sql.double() */
+          capacity_scale: SQLNumberMarker;
+          /** STRING - use sql.string() */
+          demand_freeway: SQLStringMarker;
+          /** DOUBLE - use sql.double() */
+          demand_pct: SQLNumberMarker;
+          /** STRING - use sql.string() */
+          demand_direction: SQLStringMarker;
+          /** DOUBLE - use sql.double() */
+          capacity_abs_vph: SQLNumberMarker;
+          /** DOUBLE - use sql.double() */
+          parallel_max_dist_m: SQLNumberMarker;
+          /** DOUBLE - use sql.double() */
+          parallel_max_bearing_deg: SQLNumberMarker;
+          /** DOUBLE - use sql.double() */
+          reassign_share: SQLNumberMarker;
+          /** DOUBLE - use sql.double() */
+          reassign_offnetwork_share: SQLNumberMarker;
+          /** INT - use sql.int() */
+          msa_iterations: SQLNumberMarker;
+          /** DOUBLE - use sql.double() */
+          bpr_alpha: SQLNumberMarker;
+          /** DOUBLE - use sql.double() */
+          bpr_beta: SQLNumberMarker;
+          /** STRING - use sql.string() */
+          freeway: SQLStringMarker;
+          /** INT - use sql.int() */
+          worst_n: SQLNumberMarker;
+        };
+        result: Array<{
+          /** @sqlType STRING */
+          scope: string;
+          /** @sqlType STRING */
+          freeway: string;
+          /** @sqlType STRING */
+          direction: string;
+          /** @sqlType INT */
+          bucket_idx: number;
+          /** @sqlType INT */
+          msa_iterations_used: number;
+          /** @sqlType BIGINT */
+          cells: number;
+          /** @sqlType INT */
+          stations: number;
+          /** @sqlType INT */
+          stations_with_alternative: number;
+          /** @sqlType DOUBLE */
+          vht_before: number;
+          /** @sqlType DOUBLE */
+          vht_after: number;
+          /** @sqlType DOUBLE */
+          vht_delta: number;
+          /** @sqlType DOUBLE */
+          vht_delta_pct: number;
+          /** @sqlType DOUBLE */
+          vmt_before: number;
+          /** @sqlType DOUBLE */
+          vmt_after: number;
+          /** @sqlType DOUBLE */
+          vmt_delta: number;
+          /** @sqlType DOUBLE */
+          vmt_delta_pct: number;
+          /** @sqlType DOUBLE */
+          speed_before: number;
+          /** @sqlType DOUBLE */
+          speed_after: number;
+          /** @sqlType DOUBLE */
+          speed_delta: number;
+          /** @sqlType DOUBLE */
+          vc_before: number;
+          /** @sqlType DOUBLE */
+          vc_after: number;
+          /** @sqlType DOUBLE */
+          vc_delta: number;
+          /** @sqlType DOUBLE */
+          delay_before: number;
+          /** @sqlType DOUBLE */
+          delay_after: number;
+          /** @sqlType DOUBLE */
+          delay_delta: number;
+          /** @sqlType DOUBLE */
+          delay_vht_before: number;
+          /** @sqlType DOUBLE */
+          delay_vht_after: number;
+          /** @sqlType DOUBLE */
+          delay_vht_delta: number;
+          /** @sqlType BIGINT */
+          los_ef_before: number;
+          /** @sqlType BIGINT */
+          los_ef_after: number;
+          /** @sqlType BIGINT */
+          los_ef_delta: number;
+          /** @sqlType BIGINT */
+          oversat_before: number;
+          /** @sqlType BIGINT */
+          oversat_after: number;
+          /** @sqlType DOUBLE */
+          demand_observed_veh: number;
+          /** @sqlType DOUBLE */
+          demand_lever_veh: number;
+          /** @sqlType DOUBLE */
+          demand_after_veh: number;
+          /** @sqlType DOUBLE */
+          demand_offnetwork_veh: number;
+          /** @sqlType DOUBLE */
+          conservation_error_veh: number;
+          /** @sqlType DOUBLE */
+          capacity_before_vph: number;
+          /** @sqlType DOUBLE */
+          capacity_after_vph: number;
+        }>;
+      };
+    scenario_time_matrix: {
+        name: "scenario_time_matrix";
+        parameters: {
+          /** DATE - use sql.date() */
+          day: SQLDateMarker;
+          /** STRING - use sql.string() */
+          capacity_freeway: SQLStringMarker;
+          /** STRING - use sql.string() */
+          capacity_direction: SQLStringMarker;
+          /** DOUBLE - use sql.double() */
+          capacity_pm_from: SQLNumberMarker;
+          /** DOUBLE - use sql.double() */
+          capacity_pm_to: SQLNumberMarker;
+          /** INT - use sql.int() */
+          capacity_add_lanes: SQLNumberMarker;
+          /** STRING - use sql.string() */
+          close_freeway: SQLStringMarker;
+          /** STRING - use sql.string() */
+          close_direction: SQLStringMarker;
+          /** DOUBLE - use sql.double() */
+          close_pm_from: SQLNumberMarker;
+          /** DOUBLE - use sql.double() */
+          close_pm_to: SQLNumberMarker;
+          /** INT - use sql.int() */
+          close_lanes: SQLNumberMarker;
+          /** STRING - use sql.string() */
+          incident_freeway: SQLStringMarker;
+          /** STRING - use sql.string() */
+          incident_direction: SQLStringMarker;
+          /** DOUBLE - use sql.double() */
+          incident_pm_from: SQLNumberMarker;
+          /** DOUBLE - use sql.double() */
+          incident_pm_to: SQLNumberMarker;
+          /** INT - use sql.int() */
+          incident_from_bucket: SQLNumberMarker;
+          /** INT - use sql.int() */
+          incident_to_bucket: SQLNumberMarker;
+          /** INT - use sql.int() */
+          incident_lanes_blocked: SQLNumberMarker;
+          /** DOUBLE - use sql.double() */
+          capacity_scale: SQLNumberMarker;
+          /** STRING - use sql.string() */
+          demand_freeway: SQLStringMarker;
+          /** DOUBLE - use sql.double() */
+          demand_pct: SQLNumberMarker;
+          /** STRING - use sql.string() */
+          demand_direction: SQLStringMarker;
+          /** DOUBLE - use sql.double() */
+          capacity_abs_vph: SQLNumberMarker;
+          /** DOUBLE - use sql.double() */
+          parallel_max_dist_m: SQLNumberMarker;
+          /** DOUBLE - use sql.double() */
+          parallel_max_bearing_deg: SQLNumberMarker;
+          /** DOUBLE - use sql.double() */
+          reassign_share: SQLNumberMarker;
+          /** DOUBLE - use sql.double() */
+          reassign_offnetwork_share: SQLNumberMarker;
+          /** INT - use sql.int() */
+          msa_iterations: SQLNumberMarker;
+          /** DOUBLE - use sql.double() */
+          bpr_alpha: SQLNumberMarker;
+          /** DOUBLE - use sql.double() */
+          bpr_beta: SQLNumberMarker;
+          /** STRING - use sql.string() */
+          freeway: SQLStringMarker;
+          /** INT - use sql.int() */
+          from_bucket: SQLNumberMarker;
+        };
+        result: Array<{
+          /** @sqlType INT */
+          n: number;
+          /** @sqlType INT */
+          first_bucket: number;
+          /** @sqlType INT */
+          last_bucket: number;
+          /** @sqlType INT */
+          stations: number;
+          /** @sqlType STRING */
+          flow: string;
+          /** @sqlType STRING */
+          speed_half: string;
+          /** @sqlType STRING */
+          vc_pct: string;
+          /** @sqlType STRING */
+          incident: string;
+          /** @sqlType STRING */
+          delay_c: string;
+        }>;
+      };
     station_geometry: {
         name: "station_geometry";
         parameters: Record<string, never>;

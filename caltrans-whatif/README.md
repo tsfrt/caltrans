@@ -331,9 +331,14 @@ opaque proxy 504.
 
 Explicitly out of scope for this milestone:
 
-- **M2 — the what-if engine.** No BPR volume-delay function, no incremental reassignment,
-  no scenario levers (close a segment, ±% demand, inject an incident, change capacity), no
-  before/after delta KPIs (VHT/VMT).
+- **M2 — the what-if engine.** ✅ **Now built** — see
+  **[docs/WHATIF_ENGINE.md](docs/WHATIF_ENGINE.md)**. BPR volume-delay + damped incremental
+  (MSA) reassignment as one parameterized DBSQL query, all four scenario levers, and
+  before/after VHT/VMT/v/c/speed/delay/LOS deltas per station and per corridor.
+  `config/queries/scenario_time_matrix.sql` + `scenario_kpis.sql` (both **generated** from
+  `tools/scenario_sql/engine.py`), bound by `server/scenario/`. Still missing: the lever
+  **UI**, and `MAX_ITERS` is 4 even though the measured evidence says MSA has not converged
+  there — both listed in that doc's §8.
 - **M3 — persistence + narration.** Lakebase is *not* wired (the provisioned
   `projects/caltrans-app` is untouched); no saved scenarios, no audit trail, no AI Gateway
   narration.

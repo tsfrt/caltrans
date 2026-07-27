@@ -12,10 +12,12 @@ import {
 import { ALL_CORRIDORS, bucketToLocalTime } from '../../lib/frames';
 import { useAnimationClock } from '../../lib/useAnimationClock';
 import { useAvailableDays, useCorridorOptions, useTrafficView } from '../../lib/useTrafficData';
+import { useAdvisor } from '../../lib/useAdvisor';
 import { TrafficMap, type MapScenarioMode } from '../../components/TrafficMap';
 import { ScenarioBuilderPanel } from '../../components/ScenarioBuilderPanel';
 import { ScenarioKpiPanel } from '../../components/ScenarioKpiPanel';
 import { TimeControls } from '../../components/TimeControls';
+import { AdvisorPanel } from '../../components/AdvisorPanel';
 import {
   applyMockScenario,
   computeScenarioKpis,
@@ -44,8 +46,15 @@ export function TrafficMapPage() {
   const [useExternalBasemap, setUseExternalBasemap] = useState(false);
   const [scenarioLevers, setScenarioLevers] = useState<ScenarioLever[]>([]);
   const [scenarioMode, setScenarioMode] = useState<MapScenarioMode>('baseline');
+  /**
+   * Advisor starts CLOSED so the M1 layout is byte-for-byte what it was on first load.
+   * Opening it narrows the map (a flex sibling) rather than overlaying it, so the animation
+   * and KPIs stay visible while reading the advice.
+   */
+  const [showAdvisor, setShowAdvisor] = useState(false);
 
   const clock = useAnimationClock(DEFAULT_BUCKET, 6);
+  const advisor = useAdvisor();
   const daysQ = useAvailableDays();
   const corridorsQ = useCorridorOptions();
   const view = useTrafficView(day, freeway);
@@ -60,7 +69,7 @@ export function TrafficMapPage() {
 
   const scenarioRequest = useMemo(
     () => createScenarioRequest(day, freeway, scenarioLevers),
-    [day, freeway, scenarioLevers]
+    [day, freeway, scenarioLevers],
   );
 
   const scenario = useMemo(
@@ -68,25 +77,36 @@ export function TrafficMapPage() {
       view.matrix && view.stations && scenarioLevers.length > 0
         ? applyMockScenario(view.matrix, view.stations, scenarioRequest)
         : null,
-    [view.matrix, view.stations, scenarioRequest, scenarioLevers.length]
+    [view.matrix, view.stations, scenarioRequest, scenarioLevers.length],
   );
 
   const displayMatrix = scenarioMode === 'baseline' || !scenario ? view.matrix : scenario.matrix;
 
   const baselineKpis = useMemo(
-    () => (view.matrix && view.stations ? computeScenarioKpis(view.matrix, view.stations, clock.bucket) : null),
-    [view.matrix, view.stations, clock.bucket]
+    () =>
+      view.matrix && view.stations
+        ? computeScenarioKpis(view.matrix, view.stations, clock.bucket)
+        : null,
+    [view.matrix, view.stations, clock.bucket],
   );
   const scenarioKpis = useMemo(
-    () => (scenario && view.stations ? computeScenarioKpis(scenario.matrix, view.stations, clock.bucket) : null),
-    [scenario, view.stations, clock.bucket]
+    () =>
+      scenario && view.stations
+        ? computeScenarioKpis(scenario.matrix, view.stations, clock.bucket)
+        : null,
+    [scenario, view.stations, clock.bucket],
   );
   const worstCorridors = useMemo(
     () =>
       view.matrix && view.stations
-        ? computeWorstCorridorDeltas(view.matrix, scenario?.matrix ?? view.matrix, view.stations, clock.bucket)
+        ? computeWorstCorridorDeltas(
+            view.matrix,
+            scenario?.matrix ?? view.matrix,
+            view.stations,
+            clock.bucket,
+          )
         : [],
-    [view.matrix, scenario, view.stations, clock.bucket]
+    [view.matrix, scenario, view.stations, clock.bucket],
   );
 
   useEffect(() => {
@@ -104,7 +124,9 @@ export function TrafficMapPage() {
         ) : !ready ? (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-6">
             <Skeleton className="h-4 w-64" />
-            <p className="text-sm text-muted-foreground">Loading one Pacific-local day from DBSQL…</p>
+            <p className="text-sm text-muted-foreground">
+              Loading one Pacific-local day from DBSQL…
+            </p>
           </div>
         ) : displayMatrix ? (
           <TrafficMap
@@ -151,7 +173,9 @@ export function TrafficMapPage() {
       {/* ── Side panel ──────────────────────────────────────────────────────── */}
       <aside className="w-full shrink-0 space-y-3 overflow-y-auto lg:w-[27rem]">
         <div className="space-y-2">
-          <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Day (Pacific)</label>
+          <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            Day (Pacific)
+          </label>
           <Select value={day} onValueChange={setDay}>
             <SelectTrigger data-testid="day-select">
               <SelectValue />
@@ -171,7 +195,9 @@ export function TrafficMapPage() {
         </div>
 
         <div className="space-y-2">
-          <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Corridor</label>
+          <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            Corridor
+          </label>
           <Select value={freeway} onValueChange={setFreeway}>
             <SelectTrigger data-testid="corridor-select">
               <SelectValue />
@@ -214,9 +240,16 @@ export function TrafficMapPage() {
         ) : null}
 
         <div className="space-y-2 rounded-lg border p-3" data-testid="scenario-map-mode">
-          <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Map treatment</h3>
+          <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            Map treatment
+          </h3>
           <div className="grid grid-cols-3 gap-2">
-            <ModeButton label="Baseline" value="baseline" mode={scenarioMode} onChange={setScenarioMode} />
+            <ModeButton
+              label="Baseline"
+              value="baseline"
+              mode={scenarioMode}
+              onChange={setScenarioMode}
+            />
             <ModeButton
               label="Scenario"
               value="scenario"
@@ -224,15 +257,35 @@ export function TrafficMapPage() {
               onChange={setScenarioMode}
               disabled={!scenario}
             />
-            <ModeButton label="Diff" value="diff" mode={scenarioMode} onChange={setScenarioMode} disabled={!scenario} />
+            <ModeButton
+              label="Diff"
+              value="diff"
+              mode={scenarioMode}
+              onChange={setScenarioMode}
+              disabled={!scenario}
+            />
           </div>
           <p className="text-xs text-muted-foreground">
             All three modes reuse the in-memory 24h matrix; scrubbing and playback do not query DBSQL.
           </p>
         </div>
 
+        {!showAdvisor ? (
+          <Button
+            className="w-full"
+            variant="secondary"
+            size="sm"
+            onClick={() => setShowAdvisor(true)}
+            data-testid="advisor-open"
+          >
+            Ask the AI Congestion Advisor
+          </Button>
+        ) : null}
+
         <div className="space-y-2 rounded-lg border p-3">
-          <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Layers</h3>
+          <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            Layers
+          </h3>
           <ToggleRow
             label="H3 hexagons (res 5)"
             checked={showHexes}
@@ -249,6 +302,24 @@ export function TrafficMapPage() {
           />
         </div>
       </aside>
+
+      {/* ── Advisor ─────────────────────────────────────────────────────────────
+          A flex SIBLING of the map, not an overlay: opening it narrows the map so the
+          animation and KPIs stay visible while reading the advice. The anchor it seeds a
+          session from is whatever the map shows right now — current day, current corridor
+          filter, and the clock's current bucket. */}
+      {showAdvisor ? (
+        <AdvisorPanel
+          advisor={advisor}
+          current={{
+            day,
+            bucket: clock.bucket,
+            localTime: bucketToLocalTime(clock.bucket),
+            corridor: freeway,
+          }}
+          onClose={() => setShowAdvisor(false)}
+        />
+      ) : null}
     </div>
   );
 }

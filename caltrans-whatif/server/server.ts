@@ -1,4 +1,6 @@
-import { createApp, analytics, server } from '@databricks/appkit';
+import { analytics, createApp, lakebase, server, serving } from '@databricks/appkit';
+import { registerAdvisorRoutes } from './advisor/routes.js';
+import { recordSseProbe } from './advisor/selfprobe.js';
 
 /**
  * The analytics plugin's DEFAULT query timeout is 18s (appkit/dist/plugins/analytics/
@@ -12,6 +14,66 @@ import { createApp, analytics, server } from '@databricks/appkit';
  * AppKit error the UI can render rather than an opaque proxy 504 that never reaches
  * the app logs.
  */
-createApp({
-  plugins: [analytics({ timeout: 45_000 }), server()],
-}).catch(console.error);
+const appkit = await createApp({
+  plugins: [
+    analytics({ timeout: 45_000 }),
+    /**
+     * The `serving()` plugin is registered for two things, NEITHER of which is its
+     * streaming route:
+     *   1. `AppKit.serving().invoke()` — the non-streaming fallback path.
+     *   2. Its resource declaration, which is what puts the `serving_endpoint`
+     *      CAN_QUERY requirement into the bundle and validates the wiring.
+     *
+     * Its `POST /api/serving/stream` route is NOT used: it is a raw byte pipe over the
+     * *client's* request body, so the server never observes the generated text and could
+     * neither build the prompt from DBSQL nor persist the answer. See
+     * server/advisor/model.ts for the full reasoning and the custom streaming call.
+     *
+     * Timeout is left at the plugin default (120s), which matches the platform ceiling.
+     */
+    serving(),
+    /**
+     * Lakebase handles pooling AND OAuth token refresh. That refresh is not optional:
+     * Lakebase credentials are ~1h-TTL OAuth tokens used as the Postgres password, so a
+     * naive long-lived pool dies mid-session.
+     */
+    lakebase(),
+    server(),
+  ],
+  // Not async: `server.extend` is synchronous and there is no schema bootstrap to await
+  // (migrations are applied out of band — see the note below).
+  onPluginsReady(kit) {
+    /**
+     * Routes are registered here rather than at module scope so they exist before the
+     * server accepts requests.
+     *
+     * NOTE: no schema bootstrap. The `app` schema already exists and is owned by a human
+     * user, not the app service principal, so a `CREATE TABLE IF NOT EXISTS` from here
+     * would fail on a permission check in the deployed app and, worse, would silently
+     * succeed against a fresh database and leave two divergent definitions. Migrations
+     * are applied out of band from `lakebase/*.sql`. See lakebase/README.md.
+     */
+    kit.server.extend((app) => {
+      registerAdvisorRoutes(app, {
+        db: kit.lakebase,
+        analytics: kit.analytics,
+        serving: kit.serving(),
+        logger: console,
+      });
+    });
+
+    /**
+     * Measure whether SSE survives the Apps reverse proxy IN THIS DEPLOYMENT, and record the
+     * verdict to app.audit.
+     *
+     * Necessary because the platform only says SSE "may be buffered", and Databricks Apps sits
+     * behind an SSO proxy that rejects PAT auth — so nothing outside the workspace can measure
+     * the deployed app's streaming behaviour. The app can: it holds service-principal
+     * credentials and calls its own public URL. Fire-and-forget; no-op unless
+     * ADVISOR_SELF_URL is set.
+     */
+    recordSseProbe(kit.lakebase, console);
+  },
+});
+
+export default appkit;

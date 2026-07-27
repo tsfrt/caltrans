@@ -118,8 +118,7 @@ export function useTrafficView(day: string, freeway: string): TrafficView {
   // Stations participating in the current view, in station_idx order.
   const stations = useMemo(() => {
     if (!stationsQ.data) return null;
-    const scoped =
-      freeway === 'ALL' ? stationsQ.data : stationsQ.data.filter((s) => s.freeway === freeway);
+    const scoped = freeway === 'ALL' ? stationsQ.data : stationsQ.data.filter((s) => s.freeway === freeway);
     // station_geometry.sql already orders by station_id and filter preserves order, so
     // scoped[i] corresponds to station_idx === i. Sorting defensively costs little and
     // protects against a future edit dropping the ORDER BY.
@@ -131,8 +130,24 @@ export function useTrafficView(day: string, freeway: string): TrafficView {
 
   // Rebuild only when a new window actually arrives, not on every render.
   const matrixKey = packedWindows.map((w) => (w ? w.first_bucket : 'x')).join('|');
+  const alignmentError = useMemo(() => {
+    if (!stations || stations.length === 0) return null;
+    const stale = packedWindows.find(
+      (win): win is PackedWindow => win !== null && Number(win.stations) !== stations.length
+    );
+    if (!stale) return null;
+    return (
+      `STALE WINDOW GUARD: traffic_time_matrix returned ${Number(stale.stations)} stations ` +
+      `but the active geometry has ${stations.length}. Refusing to align station_idx until ` +
+      `the corridor/day query cache catches up.`
+    );
+    // packedWindows is rebuilt each render; matrixKey captures its meaningful identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stations, matrixKey]);
+
   const matrix = useMemo(() => {
     if (!stations || stations.length === 0) return null;
+    if (alignmentError) return null;
     const present = packedWindows.filter((w): w is PackedWindow => w !== null);
     if (present.length === 0) return null;
     const m = createFrameMatrix(stations.length);
@@ -140,7 +155,7 @@ export function useTrafficView(day: string, freeway: string): TrafficView {
     return m;
     // packedWindows is rebuilt each render; matrixKey captures its meaningful identity.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stations, matrixKey]);
+  }, [stations, matrixKey, alignmentError]);
 
   const hexKey = packedHexWindows.map((w) => (w ? w.first_bucket : 'x')).join('|');
   const hexFrames = useMemo(() => {
@@ -156,7 +171,7 @@ export function useTrafficView(day: string, freeway: string): TrafficView {
   }, [hexKey]);
 
   const allQueries = [stationsQ, ...matrixWindows, ...hexWindows];
-  const error = allQueries.find((q) => q.error)?.error ?? null;
+  const error = alignmentError ?? allQueries.find((q) => q.error)?.error ?? null;
 
   return {
     matrix,
@@ -175,7 +190,7 @@ function useMatrixWindow(day: string, freeway: string, fromBucket: number) {
       freeway: sql.string(freeway),
       from_bucket: sql.int(fromBucket),
     }),
-    [day, freeway, fromBucket],
+    [day, freeway, fromBucket]
   );
   return useAnalyticsQuery('traffic_time_matrix', params);
 }
@@ -187,7 +202,7 @@ function useHexWindow(day: string, freeway: string, fromBucket: number) {
       freeway: sql.string(freeway),
       from_bucket: sql.int(fromBucket),
     }),
-    [day, freeway, fromBucket],
+    [day, freeway, fromBucket]
   );
   return useAnalyticsQuery('h3_congestion_hexes', params);
 }

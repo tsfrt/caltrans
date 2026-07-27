@@ -16,6 +16,8 @@ import { join } from 'node:path';
 
 const LOAD_TIMEOUT = 60_000;
 
+test.setTimeout(120_000);
+
 let testArtifactsDir: string;
 let consoleLogs: string[] = [];
 let consoleErrors: string[] = [];
@@ -31,9 +33,7 @@ test('smoke test - app shell renders', async ({ page }) => {
   await expect(page.getByTestId('traffic-map')).toBeVisible({ timeout: LOAD_TIMEOUT });
 });
 
-test('smoke test - animation controls and live KPIs render from warehouse data', async ({
-  page,
-}) => {
+test('smoke test - animation controls and live KPIs render from warehouse data', async ({ page }) => {
   await page.goto('/');
 
   // Play/pause exists and the Pacific clock reads a HH:MM wall time.
@@ -45,13 +45,25 @@ test('smoke test - animation controls and live KPIs render from warehouse data',
 
   // The KPI panel only renders once the time matrix has been parsed into typed arrays, so
   // this assertion transitively proves the Arrow payload arrived and decoded.
+  await expect(page.getByTestId('before-after-kpis')).toBeVisible({
+    timeout: LOAD_TIMEOUT,
+  });
   await expect(page.getByText('Mean speed', { exact: true })).toBeVisible({
     timeout: LOAD_TIMEOUT,
   });
   await expect(page.getByText('Total flow', { exact: true })).toBeVisible();
+  await expect(page.getByText('VHT', { exact: true })).toBeVisible();
   await expect(page.getByTestId('worst-corridors').locator('li').first()).toBeVisible({
     timeout: LOAD_TIMEOUT,
   });
+
+  await expect(page.getByTestId('scenario-builder')).toBeVisible();
+  await expect(page.getByText('Scenario levers')).toBeVisible();
+  await page.getByRole('button', { name: 'Add closure' }).click();
+  await expect(page.getByTestId('scenario-summary')).toContainText('Close 1 lane');
+  await expect(page.getByTestId('scenario-caveat')).toContainText('Mocked in the client');
+  await page.getByRole('button', { name: 'Diff' }).click();
+  await expect(page.getByText('Diff: red slower')).toBeVisible();
 
   // Corridor filter is populated from corridor_options.
   await expect(page.getByTestId('corridor-select')).toBeVisible();
@@ -69,18 +81,21 @@ test('smoke test - animation advances without querying the warehouse', async ({ 
 
   const clock = page.getByTestId('clock-readout');
   await expect(clock).toBeVisible({ timeout: LOAD_TIMEOUT });
-  // Wait for KPIs so all three initial queries have certainly been issued.
+  // Wait for KPIs so all 12 initial analytics requests have certainly been issued.
   await expect(page.getByText('Mean speed', { exact: true })).toBeVisible({
     timeout: LOAD_TIMEOUT,
   });
+  await expect(page.getByTestId('scenario-builder')).toBeVisible();
+
+  await page.getByRole('button', { name: 'Add closure' }).click();
+  await page.getByRole('button', { name: 'Diff' }).click();
+  await expect(page.getByTestId('scenario-summary')).toContainText('Close 1 lane');
 
   const before = await clock.textContent();
   const callsAtStart = analyticsCalls;
 
   // Autoplay is on, so the readout should change on its own.
-  await expect
-    .poll(() => clock.textContent(), { timeout: 20_000, intervals: [400] })
-    .not.toBe(before);
+  await expect.poll(() => clock.textContent(), { timeout: 20_000, intervals: [400] }).not.toBe(before);
 
   expect(analyticsCalls).toBe(callsAtStart);
 });
@@ -101,9 +116,7 @@ test.beforeEach(async ({ page }) => {
     const text = msg.text();
     if (!text.trim() || /^%[osd]$/.test(text.trim())) return;
     const location = msg.location();
-    const locationStr = location.url
-      ? ` at ${location.url}:${location.lineNumber}:${location.columnNumber}`
-      : '';
+    const locationStr = location.url ? ` at ${location.url}:${location.lineNumber}:${location.columnNumber}` : '';
     consoleLogs.push(`[${type}] ${text}${locationStr}`);
     if (type === 'error') consoleErrors.push(`${text}${locationStr}`);
   });

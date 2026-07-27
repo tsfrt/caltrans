@@ -172,15 +172,54 @@ Ran locally against the live warehouse and driven with a real Chromium browser
 - California's shape is recognizable **with no basemap tiles at all** — the corridor
   PathLayer traces I-5, US-101, I-80 etc. through their own stations ordered by postmile.
 
-## Basemap: no external dependency by default
+## Basemap: bundled by default, zero external requests (measured)
 
-Apps egress to external tile CDNs is unverified (`docs/ARCHITECTURE.md` R5). The **default
-style issues zero network requests** — it is a solid background paint layer with no
-`sources`, so the map is guaranteed to render regardless of egress policy. Geographic
-legibility comes from the data itself.
+Apps egress to external tile CDNs is unverified (`docs/ARCHITECTURE.md` R5), so the app
+**does not depend on it**. `OFFLINE_STYLE` in `client/src/lib/mapStyle.ts` is a
+self-contained style with `sources: {}` — a single `background` paint layer, no tiles, no
+glyphs URL (no text layers, so none is needed). It is what `TrafficMap.tsx` passes to
+`new maplibregl.Map({ style: ... })`, and `useExternalBasemap` defaults to `false`.
 
-An optional CARTO raster basemap can be toggled on in the Layers panel. If egress is
-blocked the raster source simply fails and the data layers remain.
+**Measured, not assumed.** Instrumenting the page and counting every request whose URL is
+not `localhost:8000`:
+
+```
+EXTERNAL (non-localhost) REQUESTS with default settings: 0
+
+After enabling the "External basemap" toggle:  26 cartocdn requests
+  https://c.basemaps.cartocdn.com/dark_all/6/10/25@2x.png   ...
+```
+
+So the deployed map **cannot** render blank due to blocked tile egress in its default
+configuration — there are no tiles to fetch. Geographic legibility comes from the data: a
+`PathLayer` traces each corridor through its own stations ordered by postmile.
+
+The CARTO raster basemap is strictly opt-in. If egress is blocked, that source fails and the
+data layers remain, so the degradation is a missing backdrop rather than a broken map.
+
+## Colour scale: clamped on speed, not on v/c
+
+`vc_ratio` in this dataset reaches a **max of 7.8163** while p99 is only 1.147, so any scale
+keyed linearly on v/c would saturate and look flat. This app is not exposed to that:
+
+- **Nothing in the render path keys on `vc_ratio`.** Colour comes from `speedToColor(speed)`.
+  `vc` is used only for *counting* (`vc > 1` → the "Over capacity" KPI) and for the LOS
+  threshold in `losFromSpeedAndVc`, neither of which is a continuous visual scale.
+- `speedToColor` clamps explicitly: `t = Math.max(0, Math.min(1, (65 - speed) / 45))`.
+  Verified across the full observed range (min 8.0 mph → free-flow 66.6 mph) plus
+  out-of-range guards:
+
+  | speed | rgb | | speed | rgb |
+  |---|---|---|---|---|
+  | 8 | `235,22,0` (clamped red) | | 55 | `149,191,63` |
+  | 20 | `235,22,0` | | 65 | `64,209,90` (green) |
+  | 48.4 | `205,179,46` | | 80 | `64,209,90` (clamped) |
+  | | | | −50 / NaN | clamped red / grey |
+
+- **Hex elevation** is the one place a magnitude *is* scaled, and it normalises against the
+  window's observed max (`congestion / max(observedMax, 0.05) * 45000`), so the ratio is
+  bounded to `[0, 1]` and a skewed distribution can't flatten it. The `0.05` floor prevents a
+  divide-by-zero on an all-free-flow corridor.
 
 ## Notable bugs found and fixed during validation
 
@@ -322,13 +361,23 @@ refetching.
 - **Single hardcoded default day** (`2026-06-10`). If the underlying table is regenerated
   with a different date range, the app opens on an empty day rather than degrading.
 - **WebGL verified only under SwiftShader** (software rasterisation) in a headless browser.
-  Not tested on real GPU hardware or in Safari/Firefox.
+  Not tested on real GPU hardware, in Safari/Firefox, or inside the deployed container.
+- **`vc_ratio`'s 7.8163 outlier is not surfaced anywhere.** It cannot distort the colour scale
+  (which is speed-keyed and clamped), but a station at v/c 7.8 is reported identically to one
+  at v/c 1.01 in the "Over capacity" count. A future severity breakdown should bucket it.
 - **H3 hexagons and stations overlap visually.** With both layers on, the hexagons can
   obscure station detail at high zoom; there is no automatic zoom-based layer switching.
-- **The hosted app's UI is unverified.** Deployment state is RUNNING and the SP provably can
-  describe/read every query, but no browser has actually loaded the deployed page — PAT auth
-  cannot pass the Apps SSO proxy from this environment. Someone with SSO should open the URL
-  and confirm the map renders there as it does locally.
+- **The hosted app's UI is unverified — this is the single biggest gap.** The deployment is
+  RUNNING and the service principal provably resolves all five queries, but **no browser has
+  ever rendered the deployed page.** `GET /` returns `302 → /oidc/oauth2/v2.0/authorize`
+  *with or without* a PAT bearer token, and `POST /api/analytics/query/*` returns 401;
+  `databricks auth login` needs an interactive browser, and `databricks apps logs` requires
+  OAuth (`OAuth Token not supported for current auth type pat`). Every screenshot and KPI
+  figure in this README comes from the **local** dev server hitting the **same live
+  warehouse**. What is proven about the deployment is that it builds, starts, serves, and can
+  read the data — *not* that its map paints. **Someone with SSO should open the URL and
+  confirm the map renders with data.** The basemap is bundled with zero external requests, so
+  tile egress is not a plausible failure mode there, but WebGL-in-that-container is untested.
 - **The UC grant is a live change to shared infrastructure**, applied at the schema level to
   the app SP. It was required to make the app work at all, but reviewers should confirm it
   matches their access policy.

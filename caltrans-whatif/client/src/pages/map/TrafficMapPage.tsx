@@ -142,8 +142,12 @@ export function TrafficMapPage() {
             scenarioMode={scenarioMode}
           />
         ) : (
-          <div className="absolute inset-0 flex items-center justify-center p-6 text-center text-amber-500">
-            Waiting for aligned scenario frame data…
+          /* Transient only: the four windows for the newly selected corridor have not landed
+             yet. A genuine station-set disagreement no longer lands here -- it THROWS from
+             useTrafficView into ErrorBoundary, which prints the two counts and a stack.
+             Silently degrading on a real mismatch is how wrong data reaches a decision. */
+          <div className="absolute inset-0 flex items-center justify-center p-6 text-center text-muted-foreground">
+            Loading frames for this corridor…
           </div>
         )}
 

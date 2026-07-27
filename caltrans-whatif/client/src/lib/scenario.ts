@@ -10,17 +10,59 @@ import {
 import type { StationRow } from './useTrafficData';
 
 /**
- * CLIENT/SERVER CONTRACT PLACEHOLDER for the M2 engine route that is not in this worktree.
+ * ┌──────────────────────────────────────────────────────────────────────────────────────┐
+ * │ ⚠️  MOCK BOUNDARY — NOTHING BELOW IS A REAL TRAFFIC MODEL.                            │
+ * └──────────────────────────────────────────────────────────────────────────────────────┘
+ *
+ * CLIENT/SERVER CONTRACT for the M2 engine route, which does NOT exist in this worktree.
+ * It is being built in parallel on `polly/whatif-engine` (server/scenario/**, which this
+ * branch deliberately does not touch).
  *
  * Expected endpoint once the engine PR lands:
  *   POST /api/scenario/run
- *   body: ScenarioRunRequest
+ *   body:     ScenarioRunRequest   (this file is the source of truth for the shape)
  *   response: ScenarioRunResponse
  *
- * The UI currently calls applyMockScenario() instead of that endpoint so animation remains
- * 100% client-side and the baseline DBSQL fetch count is unchanged. Keep this type in sync
- * with server/scenario when the engine branch merges.
+ * Until then the UI calls applyMockScenario(), a deliberately crude client-side stand-in.
+ * It exists to exercise the lever composition, the before/after KPI panel and the diff map
+ * WITHOUT adding a warehouse round-trip, so the M1 invariant (12 requests, nothing queried
+ * during animation) is preserved exactly. Swapping in the real route means replacing that
+ * one call; every consumer already reads the FrameMatrix contract.
+ *
+ * WHAT THE MOCK IS NOT:
+ *   - It is NOT the BPR volume-delay function. speedFromVc() below is a piecewise-linear
+ *     penalty with hand-picked constants, chosen to move in the right DIRECTION under load,
+ *     not to be numerically defensible. Do not read its output as a prediction.
+ *   - It does NOT reassign demand across routes. There is no road-network graph in this
+ *     dataset -- only detector stations along 10 corridors with postmiles -- so a closure
+ *     cannot divert traffic to a parallel road. Displaced demand simply stays put.
+ *   - It does NOT propagate congestion upstream/downstream. Effects are per-station.
+ *
+ * ⚠️ BPR COEFFICIENT CONFLICT, UNRESOLVED UPSTREAM. Two authorities disagree:
+ *      Lakebase app.config seeds  alpha = 0.15, beta = 4.0   (the textbook BPR defaults)
+ *      the data generator used    alpha = 0.55, beta = 4.5   (what actually shaped this data)
+ *    This UI picks NEITHER, because picking one silently would launder a real disagreement
+ *    into a number on a dashboard. The mock uses its own clearly-labelled non-BPR penalty,
+ *    and `MOCK_MODEL` below is what the panel shows the user. When the engine lands it must
+ *    declare which pair it used in ScenarioRunResponse.model, and the UI should surface that
+ *    verbatim rather than assuming. Whoever resolves the conflict should note that 0.55/4.5
+ *    is the pair consistent with the observed vc/speed relationship in gold_map_frames.
+ *
+ * ⚠️ v/c SCALING. Congestion visuals key off DEMAND-based vc_ratio (max 7.31, p99 1.14 as
+ *    measured), never `served_vc_ratio`, which is hard-capped at exactly 1.0 since the *1.02
+ *    detector allowance was removed in PR #2 and therefore carries no signal above capacity.
+ *    Because demand v/c is that skewed, nothing here may key a CONTINUOUS colour or size
+ *    scale on it unclamped -- one outlier would flatten the whole ramp. Colour comes from
+ *    speedToColor(), which clamps (65-speed)/45 into [0,1]. v/c is used only for COUNTING
+ *    (v/c > 1) and for the LOS threshold, neither of which is a continuous scale.
  */
+
+/** What the UI tells the user it is running. Kept next to the caveats it describes. */
+export const MOCK_MODEL = {
+  name: 'client-mock-not-bpr',
+  reassignment: 'none-no-network-graph',
+  bprCoefficients: 'not-used (upstream conflict: 0.15/4.0 seeded vs 0.55/4.5 generated)',
+} as const;
 export interface ScenarioRunRequest {
   schemaVersion: 'm2-scenario-v1';
   day: string;
@@ -160,9 +202,13 @@ export function applyMockScenario(
   const matrix = cloneMatrix(baseline);
   const stationIndex = new Map(stations.map((station, index) => [station.station_id, index]));
   const distances = estimateStationDistances(stations);
+  // Shown verbatim in ScenarioKpiPanel's "Model caveat" block, next to the numbers they
+  // qualify. Deliberately blunt: these deltas are directional illustrations, not forecasts.
   const warnings = [
-    'Mocked in the client pending POST /api/scenario/run from the BPR engine branch.',
-    'Simplified reassignment: stations are adjusted along observed corridors/postmiles only; no road-network graph is available.',
+    'Mocked in the client — no traffic model has run. POST /api/scenario/run (the BPR engine) is not wired up yet.',
+    'Not BPR: speeds come from a hand-tuned penalty curve, chosen to move in the right direction under load, not to be numerically accurate.',
+    'No demand reassignment: this data has no road-network graph — only detector stations along 10 corridors with postmiles — so a closure cannot divert traffic to a parallel route. Displaced demand stays put and effects do not propagate up- or downstream.',
+    'BPR coefficients are in conflict upstream (0.15/4.0 seeded in Lakebase vs 0.55/4.5 used by the data generator); this mock uses neither rather than picking one silently.',
   ];
 
   for (const lever of request.levers) {
@@ -385,9 +431,22 @@ function recomputeVcAndSpeed(
   matrix.speed[offset] = speedFromVc(matrix.vc[offset], matrix.speed[offset], speedFactor);
 }
 
+/**
+ * Speed under a perturbed v/c. NOT the BPR function -- see the MOCK BOUNDARY header.
+ *
+ * `vc` is DEMAND-based and genuinely reaches 7.31 in this dataset while p99 is only 1.14, so
+ * the penalty terms are clamped at VC_PENALTY_CEILING before use. Without that clamp a single
+ * outlier station drives `congestionPenalty` past 200, every branch saturates at the 3 mph
+ * floor, and a v/c of 7.3 becomes visually indistinguishable from one of 1.5 -- the same
+ * flattening the colour scale avoids by keying on clamped speed instead of raw v/c.
+ */
+const VC_PENALTY_CEILING = 2.5;
+
 function speedFromVc(vc: number, currentSpeed: number, speedFactor: number): number {
   if (Number.isNaN(currentSpeed)) return currentSpeed;
-  const congestionPenalty = Math.max(0, vc - 0.72) * 34 + Math.max(0, vc - 1) * 24;
+  const effectiveVc = Math.min(Math.max(vc, 0), VC_PENALTY_CEILING);
+  const congestionPenalty =
+    Math.max(0, effectiveVc - 0.72) * 34 + Math.max(0, effectiveVc - 1) * 24;
   const cappedSpeed = Math.max(4, Math.min(currentSpeed, 67 - congestionPenalty));
   return Math.max(3, cappedSpeed * speedFactor);
 }

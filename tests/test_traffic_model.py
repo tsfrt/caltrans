@@ -142,6 +142,7 @@ def test_light_demand_barely_reduces_speed():
 def test_free_flow_speed_is_higher_in_rural_areas():
     assert M.free_flow_speed(0.0) > M.free_flow_speed(1.0)
     assert M.free_flow_speed(0.0) == pytest.approx(C.FREE_FLOW_RURAL)
+    assert M.free_flow_speed(1.0) == pytest.approx(C.FREE_FLOW_URBAN)
 
 
 def test_station_type_scale_applies_once_to_capacity_and_demand():
@@ -162,7 +163,8 @@ def test_station_type_scale_applies_once_to_capacity_and_demand():
 def test_demand_and_served_flow_are_separate_under_oversaturation():
     effective_capacity = 4000.0
     demanded_flow = 5600
-    served_flow = min(demanded_flow, math.floor(effective_capacity))
+    # Mirrors bronze_station_readings: least(demand, round(effective_capacity)).
+    served_flow = min(demanded_flow, round(effective_capacity))
     demand_vc_ratio = demanded_flow / effective_capacity
     served_vc_ratio = served_flow / effective_capacity
 
@@ -170,7 +172,6 @@ def test_demand_and_served_flow_are_separate_under_oversaturation():
     assert demand_vc_ratio == pytest.approx(1.4)
     assert served_vc_ratio == pytest.approx(1.0)
     assert M.level_of_service(demand_vc_ratio) == "F"
-    assert M.free_flow_speed(1.0) == pytest.approx(C.FREE_FLOW_URBAN)
 
 
 def test_urban_corridors_are_driven_harder_than_rural_ones():

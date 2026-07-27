@@ -601,14 +601,19 @@ opaque proxy 504.
 
 Explicitly out of scope:
 
-- **The what-if engine.** No BPR volume-delay function, no incremental reassignment, no
-  scenario levers (close a segment, ±% demand, inject an incident, change capacity), no
-  before/after delta KPIs (VHT/VMT). **The advisor recommends; it does not simulate** — and it
-  is prompted to phrase effects as reasoned expectations rather than computed predictions, so it
-  cannot imply otherwise.
-- **Turning a recommendation into a scenario run.** The seam is in place
-  (`app.advisor_recommendations` carries action + target + magnitude + a null `scenario_id`) but
-  nothing consumes it. `app.scenarios` / `app.scenario_runs` remain unused by this feature.
+- **The what-if engine now exists** — BPR volume-delay + damped incremental (MSA)
+  reassignment as one parameterized DBSQL query, all four scenario levers, and before/after
+  VHT/VMT/v/c/speed/delay/LOS deltas per station and per corridor. See
+  **[docs/WHATIF_ENGINE.md](docs/WHATIF_ENGINE.md)**;
+  `config/queries/scenario_{time_matrix,kpis}.sql` are generated from
+  `tools/scenario_sql/engine.py` and bound by `server/scenario/`. Two caveats that matter:
+  `MAX_ITERS` is 4 even though the measured evidence says MSA has **not** converged there, and
+  **the advisor still recommends rather than simulates** — it is prompted to phrase effects as
+  reasoned expectations rather than computed predictions, so it cannot imply it ran the engine.
+- **Wiring the advisor to the engine.** The seam is in place on both sides —
+  `app.advisor_recommendations` carries action + target + magnitude + a null `scenario_id`, and
+  `server/scenario/contract.ts` is the request shape it would populate — but nothing consumes
+  it. `app.scenarios` / `app.scenario_runs` remain unused.
 - **No conversation summarisation.** The snapshot brief is replayed on every turn, so prompt
   cost grows linearly with transcript length.
 - **No cross-snapshot comparison.** The advisor is told a single bucket is not a trend and

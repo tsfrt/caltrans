@@ -81,7 +81,7 @@ test('smoke test - animation advances without querying the warehouse', async ({ 
 
   const clock = page.getByTestId('clock-readout');
   await expect(clock).toBeVisible({ timeout: LOAD_TIMEOUT });
-  // Wait for KPIs so all 12 initial analytics requests have certainly been issued.
+  // Wait for KPIs so the initial analytics requests have certainly been issued.
   await expect(page.getByText('Mean speed', { exact: true })).toBeVisible({
     timeout: LOAD_TIMEOUT,
   });

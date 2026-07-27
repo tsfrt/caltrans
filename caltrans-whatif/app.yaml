@@ -15,3 +15,10 @@ env:
   # when the `postgres` resource is attached.
   - name: LAKEBASE_ENDPOINT
     valueFrom: postgres
+
+  # Public URL of this app, used ONLY by the startup SSE-through-proxy diagnostic
+  # (server/advisor/selfprobe.ts): the app calls its own public URL with a service-principal
+  # OAuth token so the request traverses the real reverse proxy, then records whether the
+  # response arrived incrementally or buffered into app.audit. Unset it to disable the probe.
+  - name: ADVISOR_SELF_URL
+    value: https://caltrans-whatif-7474656503943141.aws.databricksapps.com

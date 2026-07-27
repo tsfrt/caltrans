@@ -1,5 +1,6 @@
 import { analytics, createApp, lakebase, server, serving } from '@databricks/appkit';
 import { registerAdvisorRoutes } from './advisor/routes.js';
+import { recordSseProbe } from './advisor/selfprobe.js';
 
 /**
  * The analytics plugin's DEFAULT query timeout is 18s (appkit/dist/plugins/analytics/
@@ -60,6 +61,18 @@ const appkit = await createApp({
         logger: console,
       });
     });
+
+    /**
+     * Measure whether SSE survives the Apps reverse proxy IN THIS DEPLOYMENT, and record the
+     * verdict to app.audit.
+     *
+     * Necessary because the platform only says SSE "may be buffered", and Databricks Apps sits
+     * behind an SSO proxy that rejects PAT auth — so nothing outside the workspace can measure
+     * the deployed app's streaming behaviour. The app can: it holds service-principal
+     * credentials and calls its own public URL. Fire-and-forget; no-op unless
+     * ADVISOR_SELF_URL is set.
+     */
+    recordSseProbe(kit.lakebase, console);
   },
 });
 

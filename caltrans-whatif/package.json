@@ -20,7 +20,7 @@
     "test:e2e:ui": "playwright test --ui",
     "test:smoke": "playwright install chromium && playwright test tests/smoke.spec.ts",
     "clean": "rm -rf client/dist dist build node_modules .smoke-test test-results playwright-report",
-    "postinstall": "npm run typegen",
+    "postinstall": "npm run typegen || echo 'typegen skipped (no warehouse access at install time); using committed shared/appkit-types/analytics.d.ts'",
     "prebuild": "npm run sync && npm run typegen",
     "predev": "npm run sync && npm run typegen",
     "sync": "appkit plugin sync --write --silent",

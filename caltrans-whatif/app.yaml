@@ -2,3 +2,16 @@ command: ['npm', 'run', 'start']
 env:
   - name: DATABRICKS_WAREHOUSE_ID
     valueFrom: sql-warehouse
+
+  # LLM endpoint for the AI Congestion Advisor. The endpoint NAME is injected from the
+  # bundle resource, never hardcoded in source, so the model can be swapped by editing
+  # databricks.yml alone. server/advisor/model.ts throws if this is unset rather than
+  # silently defaulting to some other model.
+  - name: DATABRICKS_SERVING_ENDPOINT_NAME
+    valueFrom: serving-endpoint
+
+  # Lakebase. LAKEBASE_ENDPOINT is the ONLY Lakebase variable set explicitly —
+  # PGHOST / PGPORT / PGDATABASE / PGUSER / PGSSLMODE are auto-injected by the platform
+  # when the `postgres` resource is attached.
+  - name: LAKEBASE_ENDPOINT
+    valueFrom: postgres

@@ -130,10 +130,27 @@ export function useTrafficView(day: string, freeway: string): TrafficView {
   const packedHexWindows = hexWindows.map((q) => firstRow(q.data));
 
   // Rebuild only when a new window actually arrives, not on every render.
-  const matrixKey = packedWindows.map((w) => (w ? w.first_bucket : 'x')).join('|');
+  //
+  // The key includes each window's STATION COUNT, not just its first bucket. On a corridor
+  // change the geometry narrows immediately (it is derived synchronously by filtering the
+  // cached all-corridor fetch) while the four matrix queries are still in flight, so for a
+  // render or two `packedWindows` still holds the PREVIOUS corridor's windows. Their
+  // first_bucket values are identical across corridors, so a bucket-only key did not change,
+  // the memo did not re-run, and 1,994-station windows were combined with 129-station
+  // geometry.
+  const matrixKey = packedWindows
+    .map((w) => (w ? `${w.first_bucket}:${w.stations}` : 'x'))
+    .join('|');
   const matrix = useMemo(() => {
     if (!stations || stations.length === 0) return null;
-    const present = packedWindows.filter((w): w is PackedWindow => w !== null);
+    // Drop windows that do not describe the current station set. applyPackedWindow throws on
+    // a mismatch — correctly, since a silent mismatch would scramble which station shows
+    // which speed — but that throw escaped to the router's ErrorBoundary and blanked the
+    // entire page mid-corridor-switch. Filtering treats a stale window as "not arrived yet",
+    // which is exactly what it is.
+    const present = packedWindows.filter(
+      (w): w is PackedWindow => w !== null && Number(w.stations) === stations.length,
+    );
     if (present.length === 0) return null;
     const m = createFrameMatrix(stations.length);
     for (const win of present) applyPackedWindow(m, win);
@@ -142,15 +159,23 @@ export function useTrafficView(day: string, freeway: string): TrafficView {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stations, matrixKey]);
 
-  const hexKey = packedHexWindows.map((w) => (w ? w.first_bucket : 'x')).join('|');
+  // Same staleness hazard as the matrix, so the key carries hex_count too.
+  const hexKey = packedHexWindows
+    .map((w) => (w ? `${w.first_bucket}:${w.hex_count}` : 'x'))
+    .join('|');
   const hexFrames = useMemo(() => {
     const present = packedHexWindows.filter((w): w is PackedHexWindow => w !== null);
     if (present.length === 0) return null;
-    // The hex dictionary is identical across windows (hex_dim spans the whole day), so any
-    // window's copy defines the index space.
+    // The hex dictionary is identical across windows OF ONE CORRIDOR (hex_dim spans the whole
+    // day), so any window's copy defines the index space — but NOT across corridors, which
+    // have different cell sets. Unlike applyPackedWindow, applyPackedHexWindow has no
+    // built-in guard: it would silently write a stale corridor's congestion values into this
+    // corridor's cell indices, producing a plausible-looking but wrong map. So pin the index
+    // space to the first window present and drop any window that disagrees.
     const hexIds = present[0].hex_ids.split(',');
+    const consistent = present.filter((w) => Number(w.hex_count) === hexIds.length);
     const frames = createHexFrames(hexIds);
-    for (const win of present) applyPackedHexWindow(frames, win);
+    for (const win of consistent) applyPackedHexWindow(frames, win);
     return frames;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hexKey]);
@@ -164,7 +189,11 @@ export function useTrafficView(day: string, freeway: string): TrafficView {
     stations,
     loading: allQueries.some((q) => q.loading),
     error,
-    windowsLoaded: packedWindows.filter(Boolean).length,
+    // Counts windows that match the CURRENT station set, so a mid-corridor-switch render
+    // does not report the previous corridor's windows as already loaded.
+    windowsLoaded: stations
+      ? packedWindows.filter((w) => w !== null && Number(w.stations) === stations.length).length
+      : 0,
   };
 }
 

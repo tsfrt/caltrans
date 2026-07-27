@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
+  Button,
   Select,
   SelectContent,
   SelectItem,
@@ -16,9 +17,11 @@ import {
 } from '../../lib/frames';
 import { useAnimationClock } from '../../lib/useAnimationClock';
 import { useAvailableDays, useCorridorOptions, useTrafficView } from '../../lib/useTrafficData';
+import { useAdvisor } from '../../lib/useAdvisor';
 import { TrafficMap } from '../../components/TrafficMap';
 import { KpiPanel } from '../../components/KpiPanel';
 import { TimeControls } from '../../components/TimeControls';
+import { AdvisorPanel } from '../../components/AdvisorPanel';
 
 /**
  * Default day: a Wednesday. Weekend profiles in this dataset are genuinely flatter
@@ -38,8 +41,15 @@ export function TrafficMapPage() {
   const [showStations, setShowStations] = useState(true);
   const [showCorridors, setShowCorridors] = useState(true);
   const [useExternalBasemap, setUseExternalBasemap] = useState(false);
+  /**
+   * Advisor starts CLOSED so the M1 layout is byte-for-byte what it was on first load.
+   * Opening it narrows the map (a flex sibling) rather than overlaying it, so the animation
+   * and KPIs stay visible while reading the advice.
+   */
+  const [showAdvisor, setShowAdvisor] = useState(false);
 
   const clock = useAnimationClock(DEFAULT_BUCKET, 6);
+  const advisor = useAdvisor();
   const daysQ = useAvailableDays();
   const corridorsQ = useCorridorOptions();
   const view = useTrafficView(day, freeway);
@@ -172,6 +182,18 @@ export function TrafficMapPage() {
           <Skeleton className="h-40 w-full" />
         )}
 
+        {!showAdvisor ? (
+          <Button
+            className="w-full"
+            variant="secondary"
+            size="sm"
+            onClick={() => setShowAdvisor(true)}
+            data-testid="advisor-open"
+          >
+            Ask the AI Congestion Advisor
+          </Button>
+        ) : null}
+
         <div className="space-y-2 rounded-lg border p-3">
           <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
             Layers
@@ -192,6 +214,24 @@ export function TrafficMapPage() {
           />
         </div>
       </aside>
+
+      {/* ── Advisor ─────────────────────────────────────────────────────────────
+          A flex SIBLING of the map, not an overlay: opening it narrows the map so the
+          animation and KPIs stay visible while reading the advice. The anchor it seeds a
+          session from is whatever the map shows right now — current day, current corridor
+          filter, and the clock's current bucket. */}
+      {showAdvisor ? (
+        <AdvisorPanel
+          advisor={advisor}
+          current={{
+            day,
+            bucket: clock.bucket,
+            localTime: bucketToLocalTime(clock.bucket),
+            corridor: freeway,
+          }}
+          onClose={() => setShowAdvisor(false)}
+        />
+      ) : null}
     </div>
   );
 }

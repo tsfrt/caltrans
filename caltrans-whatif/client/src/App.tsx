@@ -2,10 +2,12 @@ import { createBrowserRouter, RouterProvider } from 'react-router';
 import { TrafficMapPage } from './pages/map/TrafficMapPage';
 
 /**
- * California Traffic What-If — Milestone 1.
+ * California Traffic What-If.
  *
  * Single-surface app: the animated map IS the product, so there is no nav to speak of.
- * M2 (scenario levers) and M3 (saved scenarios, AI narration) add sibling routes here.
+ * The AI Congestion Advisor is a collapsible panel beside the map rather than a route, so
+ * the traffic state being discussed stays on screen. M2 (scenario levers) adds sibling
+ * routes here.
  */
 function Layout() {
   return (
@@ -13,7 +15,7 @@ function Layout() {
       <header className="flex items-center gap-3 border-b px-4 py-2 md:px-6">
         <h1 className="text-lg font-semibold text-foreground">California Traffic What-If</h1>
         <span className="rounded bg-muted px-2 py-0.5 text-xs text-muted-foreground">
-          Milestone 1 · baseline animation
+          Baseline animation · AI congestion advisor
         </span>
         <span className="ml-auto hidden text-xs text-muted-foreground sm:inline">
           lanl.caltrans_traffic · DBSQL + H3

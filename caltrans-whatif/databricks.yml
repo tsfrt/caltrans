@@ -4,12 +4,20 @@ bundle:
 variables:
   sql_warehouse_id:
     description: SQL Warehouse ID
+  serving_endpoint_name:
+    description: >-
+      Model Serving endpoint backing the AI Congestion Advisor. Any `llm/v1/chat` endpoint
+      works; the app reads only the injected name. Swap the model here, not in source.
+  lakebase_branch:
+    description: Lakebase branch resource name
+  lakebase_database:
+    description: Lakebase database resource name
 
 resources:
   apps:
     app:
       name: "caltrans-whatif"
-      description: "California traffic what-if modeling: animated geospatial map over DBSQL"
+      description: "California traffic what-if modeling: animated geospatial map over DBSQL + AI congestion advisor"
       source_code_path: ./
       # Uncomment to enable on behalf of user API scopes. Available scopes: sql, dashboards.genie, files.files, serving.serving-endpoints
       # user_api_scopes:
@@ -22,6 +30,25 @@ resources:
             id: ${var.sql_warehouse_id}
             permission: CAN_USE
 
+        # AI Gateway / Model Serving endpoint for the advisor. CAN_QUERY is auto-granted to
+        # the app service principal on deploy.
+        - name: serving-endpoint
+          serving_endpoint:
+            name: ${var.serving_endpoint_name}
+            permission: CAN_QUERY
+
+        # Lakebase (chat persistence). NOTE the resource key is `postgres`, NOT the retired
+        # `database` key — the latter fails with `Database instance <name> does not exist`.
+        #
+        # CAN_CONNECT_AND_CREATE lets the SP connect and create its OWN objects. It does NOT
+        # grant anything on the pre-existing `app` schema, which is owned by a human user, so
+        # lakebase/grants_advisor.sql must also be applied. See lakebase/README.md.
+        - name: postgres
+          postgres:
+            branch: ${var.lakebase_branch}
+            database: ${var.lakebase_database}
+            permission: CAN_CONNECT_AND_CREATE
+
 targets:
   default:
     default: true
@@ -30,3 +57,9 @@ targets:
 
     variables:
       sql_warehouse_id: 688f49c732cf9083
+      # Sonnet over Haiku: the assessment is a reasoning task over ~600 tokens of
+      # aggregates where a wrong inference is worse than a slow one, and measured latency
+      # (~10-25s streamed) is well inside the platform's 120s request ceiling.
+      serving_endpoint_name: databricks-claude-sonnet-5
+      lakebase_branch: projects/caltrans-app/branches/production
+      lakebase_database: projects/caltrans-app/branches/production/databases/databricks-postgres

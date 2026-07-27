@@ -1,0 +1,8 @@
+
+[mcp_servers.databricks]
+command = "/home/sandbox-agent/.ai-dev-kit/.venv/bin/python"
+args = ["/home/sandbox-agent/.ai-dev-kit/repo/databricks-mcp-server/run_server.py"]
+
+[mcp_servers.databricks.env]
+PYTHONPATH = ""
+PYTHONNOUSERSITE = "1"

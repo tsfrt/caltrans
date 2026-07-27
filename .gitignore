@@ -1,0 +1,15 @@
+# ai-dev-kit local install artifacts
+.ai-dev-kit/
+.agents/
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+# node
+node_modules/
+dist/
+build/
+# databricks
+.databricks/

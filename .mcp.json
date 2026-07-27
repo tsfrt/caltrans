@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "databricks": {
+      "command": "/home/sandbox-agent/.ai-dev-kit/.venv/bin/python",
+      "args": [
+        "/home/sandbox-agent/.ai-dev-kit/repo/databricks-mcp-server/run_server.py"
+      ],
+      "defer_loading": true,
+      "env": {
+        "DATABRICKS_CONFIG_PROFILE": "DEFAULT",
+        "PYTHONPATH": "",
+        "PYTHONNOUSERSITE": "1"
+      }
+    }
+  }
+}

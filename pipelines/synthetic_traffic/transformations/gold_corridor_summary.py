@@ -10,11 +10,10 @@ Corridor totals are ~11k rows per bucket-hour rather than 2k stations, so the
 scenario comparison stays interactive on a Small warehouse.
 """
 
-from pyspark import pipelines as dp
-from pyspark.sql import functions as F
-
 from caltrans_traffic import config as C
 from caltrans_traffic import traffic_model as M
+from pyspark import pipelines as dp
+from pyspark.sql import functions as F
 
 
 @dp.materialized_view(
@@ -42,6 +41,8 @@ def gold_corridor_summary():
 
     agg = src.groupBy("freeway", "direction", "time_bucket").agg(
         F.countDistinct("station_id").alias("station_count"),
+        F.round(F.avg("demanded_flow_vph")).cast("int").alias("avg_demanded_flow_vph"),
+        F.sum("demanded_flow_vph").alias("sum_demanded_flow_vph"),
         F.round(F.avg("total_flow_vph")).cast("int").alias("avg_flow_vph"),
         F.sum("total_flow_vph").alias("sum_flow_vph"),
         F.round(F.avg("avg_speed_mph"), 1).alias("avg_speed_mph"),
@@ -49,6 +50,8 @@ def gold_corridor_summary():
         F.round(F.avg("avg_occupancy"), 4).alias("avg_occupancy"),
         F.round(F.avg("vc_ratio"), 4).alias("vc_ratio"),
         F.round(F.max("vc_ratio"), 4).alias("max_vc_ratio"),
+        F.round(F.avg("served_vc_ratio"), 4).alias("served_vc_ratio"),
+        F.round(F.max("served_vc_ratio"), 4).alias("max_served_vc_ratio"),
         F.round(F.avg("free_flow_speed_mph"), 1).alias("free_flow_speed_mph"),
         F.round(F.avg("delay_vs_freeflow_min_per_mi"), 4).alias(
             "avg_delay_min_per_mi"
@@ -68,6 +71,8 @@ def gold_corridor_summary():
         F.round(F.min("postmile"), 2).alias("min_postmile"),
         F.round(F.max("postmile"), 2).alias("max_postmile"),
     )
+
+    local_time_bucket = F.from_utc_timestamp("time_bucket", C.LOCAL_TIMEZONE)
 
     return (
         agg.withColumn("level_of_service", F.expr(M.level_of_service_expr("vc_ratio")))
@@ -93,16 +98,14 @@ def gold_corridor_summary():
             "total_delay_veh_hours",
             F.expr("round(vmt * avg_delay_min_per_mi / 60.0, 2)"),
         )
-        .withColumn("hour_of_day", F.hour("time_bucket"))
-        .withColumn("reading_date", F.to_date("time_bucket"))
-        .withColumn("is_weekend", F.expr("dayofweek(time_bucket) IN (1, 7)"))
+        .withColumn("hour_of_day", F.hour(local_time_bucket))
+        .withColumn("reading_date", F.to_date(local_time_bucket))
+        .withColumn("is_weekend", F.dayofweek(local_time_bucket).isin(1, 7))
         .withColumn(
             "peak_period",
-            F.expr(
-                "CASE WHEN dayofweek(time_bucket) IN (1,7) THEN 'WEEKEND'"
-                " WHEN hour(time_bucket) BETWEEN 6 AND 9 THEN 'AM_PEAK'"
-                " WHEN hour(time_bucket) BETWEEN 15 AND 18 THEN 'PM_PEAK'"
-                " ELSE 'OFF_PEAK' END"
-            ),
+            F.when(F.dayofweek(local_time_bucket).isin(1, 7), F.lit("WEEKEND"))
+            .when(F.hour(local_time_bucket).between(6, 9), F.lit("AM_PEAK"))
+            .when(F.hour(local_time_bucket).between(15, 18), F.lit("PM_PEAK"))
+            .otherwise(F.lit("OFF_PEAK")),
         )
     )

@@ -6,11 +6,10 @@ Generated as a station x day cross join thinned by a deterministic hash, so the
 same incidents reappear on every full refresh.
 """
 
-from pyspark import pipelines as dp
-from pyspark.sql import functions as F
-
 from caltrans_traffic import config as C
 from caltrans_traffic import traffic_model as M
+from pyspark import pipelines as dp
+from pyspark.sql import functions as F
 
 
 @dp.materialized_view(
@@ -97,14 +96,22 @@ def bronze_incidents():
         .withColumn("_start_hour", F.expr(start_hour))
         # Snap starts to the 5-minute detector grid so incident windows align
         # with the sample cadence and always cover >= 1 reading.
+        #
+        # _local_start_ts is a naive America/Los_Angeles wall clock, because
+        # start_hour above is expressed in local commute hours (6.5-9.5am,
+        # 3.5-7pm). bronze_station_readings builds its local clock the same way
+        # and stores ts as a UTC instant, so this MUST make the same conversion:
+        # comparing a naive-local incident window against a UTC reading ts
+        # silently shifts every window by the Pacific offset (7h in PDT).
         .withColumn(
-            "start_ts",
+            "_local_start_ts",
             F.expr(
                 f"date_trunc('HOUR', timestampadd(DAY, day_offset, timestamp'{C.SIM_START}'))"
                 f" + make_interval(0, 0, 0, 0, cast(floor(_start_hour) as int),"
                 f" cast(floor((_start_hour - floor(_start_hour)) * 12) * 5 as int), 0)"
             ),
         )
+        .withColumn("start_ts", F.to_utc_timestamp("_local_start_ts", C.LOCAL_TIMEZONE))
         .withColumn(
             "duration_min",
             F.expr(
@@ -149,6 +156,6 @@ def bronze_incidents():
             "lanes_blocked",
             "num_lanes",
             "incident_type",
-            F.current_timestamp().alias("_generated_at"),
+            F.to_timestamp(F.lit(C.GENERATION_TIMESTAMP_UTC)).alias("_generated_at"),
         )
     )

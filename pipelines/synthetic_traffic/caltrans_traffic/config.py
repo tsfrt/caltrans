@@ -14,8 +14,16 @@ from __future__ import annotations
 # ---------------------------------------------------------------------------
 
 #: Wall-clock (America/Los_Angeles) start of the simulated window. 2026-06-01
-#: is a Monday, so the window starts cleanly on a commute day.
+#: is a Monday, so the window starts cleanly on a commute day. Transformations
+#: convert this local wall-clock to UTC for persisted ``ts`` values.
 SIM_START = "2026-06-01 00:00:00"
+
+#: IANA timezone used by the diurnal demand model and app-facing time filters.
+LOCAL_TIMEZONE = "America/Los_Angeles"
+
+#: Fixed metadata timestamp for deterministic full refreshes. This is not the
+#: wall-clock run time; it identifies the generation configuration version.
+GENERATION_TIMESTAMP_UTC = "2026-06-01 00:00:00"
 
 #: Number of days simulated.
 SIM_DAYS = 30
@@ -131,6 +139,11 @@ CAPACITY_RURAL_VPL = 1950
 
 #: PeMS station type mix. ML=mainline, HV=HOV, OR=on-ramp, FR=off-ramp.
 STATION_TYPE_WEIGHTS = (("ML", 0.70), ("HV", 0.12), ("OR", 0.09), ("FR", 0.09))
+
+#: Relative capacity/demand scale by station facility type. This is applied
+#: exactly once by scaling base capacity; latent demand is demand_factor times
+#: that scaled base capacity, not an additional station-type multiplier.
+STATION_TYPE_SCALE = {"ML": 1.00, "HV": 0.55, "OR": 0.22, "FR": 0.20}
 
 
 # ---------------------------------------------------------------------------

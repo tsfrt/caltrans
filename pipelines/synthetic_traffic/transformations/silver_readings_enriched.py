@@ -1,15 +1,15 @@
 """Silver: readings joined to the station dimension with congestion metrics.
 
 Drops unusable observations (dark detectors reporting 0% observed) and adds the
-derived congestion measures the app and the what-if engine consume: v/c ratio,
-HCM level of service, delay versus free-flow, and a congestion flag.
+derived congestion measures the app and the what-if engine consume: latent demand
+v/c ratio, served v/c ratio, HCM level of service, delay versus free-flow, and a
+congestion flag.
 """
-
-from pyspark import pipelines as dp
-from pyspark.sql import functions as F
 
 from caltrans_traffic import config as C
 from caltrans_traffic import traffic_model as M
+from pyspark import pipelines as dp
+from pyspark.sql import functions as F
 
 #: Minimum detector observation rate to treat a reading as usable. PeMS
 #: analysts commonly discard samples below ~20% observed; we use the same idea.
@@ -32,7 +32,9 @@ MIN_OBSERVED_PCT = 20.0
 @dp.expect_or_fail("station_id_not_null", "station_id IS NOT NULL")
 @dp.expect_or_fail("ts_not_null", "ts IS NOT NULL")
 @dp.expect_or_drop("usable_observation", f"observed_pct >= {MIN_OBSERVED_PCT}")
+@dp.expect_or_drop("demand_nonneg", "demanded_flow_vph >= 0")
 @dp.expect_or_drop("flow_nonneg", "total_flow_vph >= 0")
+@dp.expect_or_drop("served_not_above_demand", "total_flow_vph <= demanded_flow_vph")
 @dp.expect_or_drop("speed_in_range", "avg_speed_mph > 0 AND avg_speed_mph <= 100")
 @dp.expect_or_drop("occupancy_fraction", "avg_occupancy BETWEEN 0 AND 1")
 @dp.expect_or_drop("vc_ratio_nonneg", "vc_ratio >= 0")
@@ -65,12 +67,17 @@ def silver_readings_enriched():
 
     df = readings.join(F.broadcast(stations), on="station_id", how="inner")
 
-    # v/c against the capacity actually available at that moment (incident
-    # reductions included), which is what determines observed congestion.
+    # vc_ratio is latent demand over capacity, not capped detector throughput.
+    # served_vc_ratio is retained for detector-throughput sanity checks.
     df = df.withColumn(
         "vc_ratio",
+        F.expr("round(demanded_flow_vph / greatest(1.0, effective_capacity_vph), 4)"),
+    ).withColumn(
+        "served_vc_ratio",
         F.expr("round(total_flow_vph / greatest(1.0, effective_capacity_vph), 4)"),
     )
+
+    local_ts = F.from_utc_timestamp("ts", C.LOCAL_TIMEZONE)
 
     return (
         df.withColumn("level_of_service", F.expr(M.level_of_service_expr("vc_ratio")))
@@ -87,19 +94,19 @@ def silver_readings_enriched():
             F.expr(M.is_congested_expr("avg_speed_mph", "free_flow_speed_mph")),
         )
         .withColumn("speed_ratio", F.expr("round(avg_speed_mph / free_flow_speed_mph, 4)"))
-        # Time dimensions the app filters and animates on.
-        .withColumn("reading_date", F.to_date("ts"))
-        .withColumn("hour_of_day", F.hour("ts"))
-        .withColumn("day_of_week", F.dayofweek("ts"))
-        .withColumn("is_weekend", F.expr("dayofweek(ts) IN (1, 7)"))
+        # Time dimensions are Pacific local, while ts/time_bucket remain UTC
+        # instants. from_utc_timestamp applies the workspace timezone rules,
+        # including DST transitions.
+        .withColumn("reading_date", F.to_date(local_ts))
+        .withColumn("hour_of_day", F.hour(local_ts))
+        .withColumn("day_of_week", F.dayofweek(local_ts))
+        .withColumn("is_weekend", F.dayofweek(local_ts).isin(1, 7))
         .withColumn(
             "peak_period",
-            F.expr(
-                "CASE WHEN dayofweek(ts) IN (1,7) THEN 'WEEKEND'"
-                " WHEN hour(ts) BETWEEN 6 AND 9 THEN 'AM_PEAK'"
-                " WHEN hour(ts) BETWEEN 15 AND 18 THEN 'PM_PEAK'"
-                " ELSE 'OFF_PEAK' END"
-            ),
+            F.when(F.dayofweek(local_ts).isin(1, 7), F.lit("WEEKEND"))
+            .when(F.hour(local_ts).between(6, 9), F.lit("AM_PEAK"))
+            .when(F.hour(local_ts).between(15, 18), F.lit("PM_PEAK"))
+            .otherwise(F.lit("OFF_PEAK")),
         )
         # 15-minute bucket used by the gold animation frames.
         .withColumn(
@@ -133,6 +140,7 @@ def silver_readings_enriched():
             "h3_r8",
             "h3_r8_str",
             "h3_r9",
+            "demanded_flow_vph",
             "total_flow_vph",
             "avg_occupancy",
             "avg_speed_mph",
@@ -147,6 +155,7 @@ def silver_readings_enriched():
             "baseline_lanes",
             "baseline_lane_capacity_vph",
             "vc_ratio",
+            "served_vc_ratio",
             "level_of_service",
             "delay_vs_freeflow_min_per_mi",
             "is_congested",

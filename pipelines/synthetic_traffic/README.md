@@ -78,17 +78,19 @@ touches ~2,022 rows.
 
 | Column | Type | Notes |
 |---|---|---|
-| `station_id`, `ts` | STRING, TIMESTAMP | 5-minute grid |
-| `total_flow_vph` | INT | Served flow, saturates at capacity |
+| `station_id`, `ts` | STRING, TIMESTAMP | 5-minute grid; UTC instant |
+| `demanded_flow_vph` | INT | Latent demand before detector throughput saturation |
+| `total_flow_vph` | INT | Served detector throughput, saturates near capacity |
 | `avg_occupancy` | DOUBLE | Fraction 0..1, derived from flow & speed |
 | `avg_speed_mph` | DOUBLE | BPR output + 2.5% jitter |
 | `observed_pct` | DOUBLE | Detector health; 0 for dark stations |
 | `num_lanes_reporting` | INT | `num_lanes × observed_pct` |
-| **silver adds:** `vc_ratio` | DOUBLE | flow / effective capacity |
+| **silver adds:** `vc_ratio` | DOUBLE | latent demand / effective capacity; can exceed 1.0 |
+| `served_vc_ratio` | DOUBLE | served throughput / effective capacity; capped at capacity |
 | `level_of_service` | STRING | HCM grade A–F |
 | `delay_vs_freeflow_min_per_mi` | DOUBLE | Extra min/mile vs free-flow |
 | `is_congested` | BOOLEAN | speed < 75% of own free-flow |
-| `time_bucket`, `peak_period`, `hour_of_day`, `is_weekend` | | Animation/filter dimensions |
+| `time_bucket`, `peak_period`, `hour_of_day`, `is_weekend` | | `time_bucket` is UTC; date/hour/period dimensions are America/Los_Angeles local |
 | `incident_active`, `lanes_blocked`, `incident_severity` | | Incident context |
 
 ### `bronze_incidents`
@@ -101,10 +103,13 @@ touches ~2,022 rows.
 
 ## The generation model
 
-All math lives in `caltrans_traffic/traffic_model.py`, held **twice**: a pure-Python
-reference implementation and a Spark SQL expression builder. `tests/test_traffic_model.py`
-asserts the two agree numerically, so the documented math, the tested math and the
-math that runs on the cluster cannot drift apart.
+Most model math lives in `caltrans_traffic/traffic_model.py`, held **twice**: a
+pure-Python reference implementation and Spark SQL expression builders. The unit
+tests compare the arithmetic expressions the Python shim can safely evaluate and
+also lock key pipeline contracts by inspecting transformation source. They catch
+numeric drift in the core formulas, but they are not a substitute for running the
+SDP: Spark CASE, timestamp, type-coercion and function-resolution semantics are
+validated by the deployed pipeline run.
 
 ### 1. Geography
 
@@ -136,12 +141,23 @@ animated map read as a commute rather than a synchronised pulse.
 
 Demand is then scaled by day-of-week (Friday 1.05 heaviest, Sunday 0.62 lightest),
 by urbanisation (`0.45 + 0.75·urban`, so only dense corridors exceed capacity),
-and by log-normal noise (σ=0.08).
+and by log-normal noise (σ=0.08). The diurnal profile is evaluated in
+`America/Los_Angeles` local time, then `ts` is stored as UTC. App clients should
+animate/filter by `hour_of_day`/`peak_period` or convert `ts`/`time_bucket` with
+`from_utc_timestamp(..., 'America/Los_Angeles')`; displaying raw UTC hours will
+mislabel California rush hour. Spark's timezone database handles DST for this
+conversion; the current 30-day June window is entirely PDT, so no transition is
+inside the generated range.
+
+Station type (`ML`/`HV`/`OR`/`FR`) scales the facility exactly once through
+`base_capacity_vph = num_lanes × lane_capacity_vph × station_type_scale`. Latent
+demand is `demand_factor × base_capacity_vph`; there is no second station-type
+multiplier.
 
 ### 3. Capacity and incidents
 
 ```
-effective_capacity = num_lanes · lane_capacity_vph · incident_factor
+effective_capacity = num_lanes · lane_capacity_vph · station_type_scale · incident_factor
 incident_factor    = (open_lanes / num_lanes) · (1 − 0.12)
 ```
 
@@ -170,8 +186,9 @@ has driven the 405 would accept. Speed floors at 8 mph (creep, not gridlock).
 
 > **Limitation:** BPR is monotonically decreasing, so it does not reproduce the
 > backward-bending (hypercongested) branch of a true fundamental diagram, where
-> *flow itself* falls once density passes critical. `total_flow_vph` is demand
-> served, capped at capacity — not measured throughput under breakdown.
+> *flow itself* falls once density passes critical. `demanded_flow_vph` preserves
+> latent demand for what-if modeling, while `total_flow_vph` is served detector
+> throughput capped near effective capacity.
 
 ### 5. Occupancy — derived, not invented
 
@@ -186,9 +203,11 @@ do. A 20 ft effective length covers vehicle plus detection zone.
 
 ### 6. Determinism
 
-Every pseudo-random draw is `hash(keys..., seed)`, never `rand()`. A full refresh
-regenerates byte-identical data, which matters because the app's saved what-if
-scenarios reference `station_id`s and compare against baseline numbers.
+Every pseudo-random draw is `hash(keys..., seed)`, never `rand()`. Station,
+incident and traffic values are deterministic for a fixed code/config version,
+including `_generated_at`, which is a fixed generation-version timestamp rather
+than the wall-clock refresh time. Physical row ordering and Delta file layout are
+not part of the reproducibility claim.
 
 ---
 
@@ -198,8 +217,8 @@ scenarios reference `station_id`s and compare against baseline numbers.
 |---|---|
 | `bronze_stations` | `expect_or_fail`: non-null id, id shape. `expect_or_drop`: lat/lon in CA bbox, district 1–12, direction in NSEW, lanes 1–8, capacity 1000–2400 |
 | `bronze_incidents` | `expect_or_fail`: non-null id. `expect_or_drop`: `end_ts > start_ts`, severity 1–4, `lanes_blocked ≤ num_lanes`, valid type |
-| `bronze_station_readings` | `expect_or_fail`: non-null id/ts. `expect_or_drop`: flow ≥ 0 and ≤ 20000, speed in (0,100], occupancy in [0,1], observed_pct 0–100 |
-| `silver_readings_enriched` | drops `observed_pct < 20` (unusable samples), plus v/c ≥ 0 and valid LOS |
+| `bronze_station_readings` | `expect_or_fail`: non-null id/ts. `expect_or_drop`: latent demand ≥ 0, served flow ≥ 0 and ≤ latent demand and ≤ 20000, speed in (0,100], occupancy in [0,1], observed_pct 0–100 |
+| `silver_readings_enriched` | drops `observed_pct < 20` (unusable samples), plus demand-based v/c ≥ 0 and valid LOS. v/c > 1.0 is valid oversaturation and is not dropped |
 | `silver_stations_geo` | non-null H3/geom, positive baseline capacity, `ST_SRID(geom) = 4326` |
 | `gold_*` | CA bbox, speed range, valid LOS, positive baseline capacity |
 

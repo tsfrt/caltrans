@@ -6,6 +6,7 @@ there is no upstream to tail, and a full recompute is both cheap and required
 for reproducibility.
 """
 
+from caltrans_traffic import config as C
 from caltrans_traffic.stations import stations_values_sql
 from pyspark import pipelines as dp
 from pyspark.sql import functions as F
@@ -40,6 +41,6 @@ def bronze_stations():
     # readings fact table is generated entirely in Spark.
     return (
         spark.sql(stations_values_sql())
-        .withColumn("_generated_at", F.current_timestamp())
+        .withColumn("_generated_at", F.to_timestamp(F.lit(C.GENERATION_TIMESTAMP_UTC)))
         .withColumn("_generator_version", F.lit("v1"))
     )

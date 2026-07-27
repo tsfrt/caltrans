@@ -138,6 +138,20 @@ def lane_capacity_vph(urban_intensity: float) -> int:
     return int(round(_lerp(C.CAPACITY_RURAL_VPL, C.CAPACITY_URBAN_VPL, urban_intensity)))
 
 
+def station_type_scale(station_type: str) -> float:
+    """Relative facility scale for capacity and latent demand."""
+    return C.STATION_TYPE_SCALE.get(station_type, C.STATION_TYPE_SCALE["FR"])
+
+
+def station_type_scale_expr(station_type_expr: str) -> str:
+    """Spark SQL mirroring :func:`station_type_scale`."""
+    cases = " ".join(
+        f"WHEN '{station_type}' THEN {scale}"
+        for station_type, scale in C.STATION_TYPE_SCALE.items()
+    )
+    return f"CASE {station_type_expr} {cases} ELSE {C.STATION_TYPE_SCALE['FR']} END"
+
+
 def demand_scale(urban_intensity: float) -> float:
     """How hard peak demand pushes against capacity, by urbanisation.
 

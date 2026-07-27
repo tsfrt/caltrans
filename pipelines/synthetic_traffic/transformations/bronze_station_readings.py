@@ -14,15 +14,16 @@ The generation chain, in order:
 5. **Occupancy** = derived from flow and speed via density = flow / speed, so
    the three reported measures stay mutually consistent.
 
-Everything is derived from hashes of (station_id, interval) rather than rand(),
-so a full refresh reproduces byte-identical data.
+The simulated clock is generated in America/Los_Angeles local time and then
+stored as UTC timestamps. Everything except metadata columns in upstream
+dimension tables is derived from hashes of (station_id, interval) rather than
+rand(), so traffic measures are reproducible across full refreshes.
 """
-
-from pyspark import pipelines as dp
-from pyspark.sql import functions as F
 
 from caltrans_traffic import config as C
 from caltrans_traffic import traffic_model as M
+from pyspark import pipelines as dp
+from pyspark.sql import functions as F
 
 
 @dp.materialized_view(
@@ -41,7 +42,9 @@ from caltrans_traffic import traffic_model as M
 )
 @dp.expect_or_fail("station_id_not_null", "station_id IS NOT NULL")
 @dp.expect_or_fail("ts_not_null", "ts IS NOT NULL")
+@dp.expect_or_drop("demand_nonneg", "demanded_flow_vph >= 0")
 @dp.expect_or_drop("flow_nonneg", "total_flow_vph >= 0")
+@dp.expect_or_drop("served_not_above_demand", "total_flow_vph <= demanded_flow_vph")
 @dp.expect_or_drop("flow_upper_bound", "total_flow_vph <= 20000")
 @dp.expect_or_drop("speed_in_range", "avg_speed_mph > 0 AND avg_speed_mph <= 100")
 @dp.expect_or_drop("occupancy_fraction", "avg_occupancy BETWEEN 0 AND 1")
@@ -69,16 +72,18 @@ def bronze_station_readings():
     df = (
         stations.join(intervals, how="cross")
         .withColumn(
-            "ts",
+            "local_ts",
             F.expr(
                 f"timestampadd(MINUTE, interval_idx * {C.INTERVAL_MINUTES},"
                 f" timestamp'{C.SIM_START}')"
             ),
         )
+        .withColumn("ts", F.to_utc_timestamp("local_ts", C.LOCAL_TIMEZONE))
         # Fractional hour drives the smooth Gaussian profile; dayofweek drives
-        # weekday/weekend shape.
-        .withColumn("hour_frac", F.expr("hour(ts) + minute(ts) / 60.0"))
-        .withColumn("dow", F.dayofweek("ts"))
+        # weekday/weekend shape. Both are intentionally local Pacific values;
+        # using UTC here moves California commute peaks into the wrong app hour.
+        .withColumn("hour_frac", F.expr("hour(local_ts) + minute(local_ts) / 60.0"))
+        .withColumn("dow", F.dayofweek("local_ts"))
         .withColumn("is_weekend", F.expr("dow IN (1, 7)"))
     )
 
@@ -93,13 +98,12 @@ def bronze_station_readings():
         ),
     )
 
-    # Ramps and HOV lanes carry a fraction of mainline volume.
+    # Ramps and HOV lanes have proportionally smaller facilities and demand.
+    # Apply this station-type scale once by scaling base capacity; latent demand
+    # is then demand_factor × base_capacity_vph, not type_scale squared.
     df = df.withColumn(
         "type_scale",
-        F.expr(
-            "CASE station_type WHEN 'ML' THEN 1.0 WHEN 'HV' THEN 0.55"
-            " WHEN 'OR' THEN 0.22 ELSE 0.20 END"
-        ),
+        F.expr(M.station_type_scale_expr("station_type")),
     )
 
     # --- 2. capacity, reduced by any active incident -------------------------
@@ -142,10 +146,10 @@ def bronze_station_readings():
 
     # --- 3. demanded flow and v/c -------------------------------------------
     df = df.withColumn(
-        "demanded_flow", F.expr("demand_factor * base_capacity_vph * type_scale")
+        "demanded_flow_vph", F.expr("cast(round(demand_factor * base_capacity_vph) as int)")
     ).withColumn(
         "vc_ratio",
-        F.expr("demanded_flow / greatest(1.0, effective_capacity_vph)"),
+        F.expr("demanded_flow_vph / greatest(1.0, effective_capacity_vph)"),
     )
 
     # --- 4. speed via BPR ----------------------------------------------------
@@ -165,11 +169,11 @@ def bronze_station_readings():
         ),
     )
 
-    # Served flow: at v/c > 1 a real detector cannot record more than capacity,
-    # so throughput saturates even though demand keeps climbing.
+    # Served flow: at v/c > 1 a real detector cannot record more than
+    # capacity, so throughput saturates even though latent demand keeps climbing.
     df = df.withColumn(
         "total_flow_vph",
-        F.expr("cast(round(least(demanded_flow, effective_capacity_vph * 1.02)) as int)"),
+        F.expr("least(demanded_flow_vph, cast(floor(effective_capacity_vph) as int))"),
     )
 
     # --- 5. occupancy derived from flow and speed ---------------------------
@@ -207,6 +211,7 @@ def bronze_station_readings():
     return df.select(
         "station_id",
         "ts",
+        "demanded_flow_vph",
         "total_flow_vph",
         "avg_occupancy",
         "avg_speed_mph",

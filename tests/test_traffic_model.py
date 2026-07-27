@@ -9,9 +9,11 @@ speed-flow curve, self-consistent occupancy, and correct LOS banding.
 from __future__ import annotations
 
 import math
+from datetime import datetime, timedelta
+from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
-
 from caltrans_traffic import config as C
 from caltrans_traffic import traffic_model as M
 
@@ -31,6 +33,18 @@ def test_weekday_has_two_distinct_commute_peaks():
     pm = _peak_hour("N", False, 12.0, 22.0)
     assert 7.0 <= am <= 9.0, f"AM peak at {am}, expected 7-9am"
     assert 16.0 <= pm <= 19.0, f"PM peak at {pm}, expected 4-7pm"
+
+
+def test_commute_peaks_are_pacific_local_not_utc():
+    tz = ZoneInfo(C.LOCAL_TIMEZONE)
+    sim_start = datetime.fromisoformat(C.SIM_START).replace(tzinfo=tz)
+    am_peak_local = sim_start + timedelta(hours=C.AM_MU)
+    pm_peak_local = sim_start + timedelta(hours=C.PM_MU)
+
+    assert 7 <= am_peak_local.hour <= 9
+    assert 16 <= pm_peak_local.hour <= 19
+    assert am_peak_local.astimezone(ZoneInfo("UTC")).hour not in range(7, 10)
+    assert pm_peak_local.astimezone(ZoneInfo("UTC")).hour not in range(16, 20)
 
 
 def test_midday_is_a_trough_between_the_peaks():
@@ -128,6 +142,34 @@ def test_light_demand_barely_reduces_speed():
 def test_free_flow_speed_is_higher_in_rural_areas():
     assert M.free_flow_speed(0.0) > M.free_flow_speed(1.0)
     assert M.free_flow_speed(0.0) == pytest.approx(C.FREE_FLOW_RURAL)
+
+
+def test_station_type_scale_applies_once_to_capacity_and_demand():
+    demand_factor = 0.8
+    lanes = 2
+    lane_capacity = 2000
+
+    for station_type, type_scale in C.STATION_TYPE_SCALE.items():
+        base_capacity = lanes * lane_capacity * M.station_type_scale(station_type)
+        demanded_flow = round(demand_factor * base_capacity)
+
+        assert M.station_type_scale(station_type) == pytest.approx(type_scale)
+        assert demanded_flow == round(demand_factor * lanes * lane_capacity * type_scale)
+        if station_type != "ML":
+            assert demanded_flow != round(demand_factor * base_capacity * type_scale)
+
+
+def test_demand_and_served_flow_are_separate_under_oversaturation():
+    effective_capacity = 4000.0
+    demanded_flow = 5600
+    served_flow = min(demanded_flow, math.floor(effective_capacity))
+    demand_vc_ratio = demanded_flow / effective_capacity
+    served_vc_ratio = served_flow / effective_capacity
+
+    assert demanded_flow > served_flow
+    assert demand_vc_ratio == pytest.approx(1.4)
+    assert served_vc_ratio == pytest.approx(1.0)
+    assert M.level_of_service(demand_vc_ratio) == "F"
     assert M.free_flow_speed(1.0) == pytest.approx(C.FREE_FLOW_URBAN)
 
 
@@ -370,3 +412,120 @@ def test_dow_scale_expr_lists_every_day():
     sql = M.dow_scale_expr("dow")
     for day, scale in C.DOW_SCALE.items():
         assert f"WHEN {day} THEN {scale}" in sql
+
+
+def test_station_type_scale_expr_lists_every_type():
+    sql = M.station_type_scale_expr("station_type")
+    for station_type, scale in C.STATION_TYPE_SCALE.items():
+        assert f"WHEN '{station_type}' THEN {scale}" in sql
+
+
+def test_pipeline_sql_uses_local_time_and_carries_latent_demand():
+    root = Path(__file__).resolve().parents[1]
+    bronze = (
+        root / "pipelines/synthetic_traffic/transformations/bronze_station_readings.py"
+    ).read_text()
+    silver = (
+        root / "pipelines/synthetic_traffic/transformations/silver_readings_enriched.py"
+    ).read_text()
+
+    assert "to_utc_timestamp(\"local_ts\"" in bronze
+    assert "hour(local_ts) + minute(local_ts) / 60.0" in bronze
+    assert "demand_factor * base_capacity_vph" in bronze
+    assert "demand_factor * base_capacity_vph * type_scale" not in bronze
+    assert '"demanded_flow_vph"' in bronze
+    assert "demanded_flow_vph / greatest(1.0, effective_capacity_vph)" in silver
+    assert "total_flow_vph / greatest(1.0, effective_capacity_vph)" in silver
+
+
+# ---------------------------------------------------------------------------
+# Incident window / reading clock alignment
+# ---------------------------------------------------------------------------
+# bronze_incidents picks its start hour in LOCAL commute hours and
+# bronze_station_readings stores ts as a UTC instant. Both must convert through
+# the same timezone or the incident join silently misses by the Pacific offset.
+
+
+def _reading_instant(interval_idx: int) -> datetime:
+    """UTC instant of a reading, mirroring bronze_station_readings."""
+    tz = ZoneInfo(C.LOCAL_TIMEZONE)
+    local = datetime.fromisoformat(C.SIM_START).replace(tzinfo=tz) + timedelta(
+        minutes=interval_idx * C.INTERVAL_MINUTES
+    )
+    return local.astimezone(ZoneInfo("UTC"))
+
+
+def _incident_window(
+    day_offset: int, start_hour: float, duration_min: int, *, to_utc: bool
+) -> tuple[datetime, datetime]:
+    """(start, end) of an incident window, mirroring bronze_incidents.
+
+    ``to_utc=False`` reproduces the pre-fix behaviour, where the naive local
+    wall clock was persisted as if it were already a UTC instant.
+    """
+    tz = ZoneInfo(C.LOCAL_TIMEZONE)
+    naive = datetime.fromisoformat(C.SIM_START) + timedelta(days=day_offset)
+    # Snap to the 5-minute detector grid exactly as the SQL does.
+    minutes = math.floor((start_hour - math.floor(start_hour)) * 12) * 5
+    naive += timedelta(hours=math.floor(start_hour), minutes=minutes)
+    start = naive.replace(tzinfo=ZoneInfo("UTC") if not to_utc else tz)
+    start = start.astimezone(ZoneInfo("UTC"))
+    return start, start + timedelta(minutes=duration_min)
+
+
+def test_incident_window_covers_the_reading_at_its_local_hour():
+    """An 8:00am local incident must hit the 8:00am local reading."""
+    day_offset, local_hour, duration_min = 1, 8.0, 30
+    # 8:00am local on day 1 == interval 1 * 288 + 8 * 12.
+    interval_idx = (day_offset * C.INTERVALS_PER_DAY) + int(local_hour * 12)
+    reading_ts = _reading_instant(interval_idx)
+
+    # Sanity: the reading really is at 8am Pacific.
+    assert reading_ts.astimezone(ZoneInfo(C.LOCAL_TIMEZONE)).hour == 8
+
+    start, end = _incident_window(day_offset, local_hour, duration_min, to_utc=True)
+    assert start <= reading_ts < end, (
+        f"incident window {start}..{end} misses reading at {reading_ts}"
+    )
+    assert start.astimezone(ZoneInfo(C.LOCAL_TIMEZONE)).hour == 8
+
+
+def test_naive_incident_window_would_miss_the_reading():
+    """Regression guard: the pre-fix naive-local window is off by the PDT offset."""
+    day_offset, local_hour, duration_min = 1, 8.0, 30
+    interval_idx = (day_offset * C.INTERVALS_PER_DAY) + int(local_hour * 12)
+    reading_ts = _reading_instant(interval_idx)
+
+    start, end = _incident_window(day_offset, local_hour, duration_min, to_utc=False)
+    assert not (start <= reading_ts < end), (
+        "naive-local incident window unexpectedly matched; the regression test "
+        "no longer reproduces the bug it guards against"
+    )
+    # It lands 7 hours early in PDT, i.e. at 1am Pacific instead of 8am.
+    assert start.astimezone(ZoneInfo(C.LOCAL_TIMEZONE)).hour == 1
+
+
+@pytest.mark.parametrize("local_hour", [0.0, 6.5, 8.25, 15.5, 18.75, 23.0])
+def test_incident_windows_align_at_every_local_hour(local_hour):
+    """Every incident start hour the generator can draw must find its reading."""
+    day_offset, duration_min = 3, 15
+    interval_idx = (day_offset * C.INTERVALS_PER_DAY) + int(local_hour * 12)
+    reading_ts = _reading_instant(interval_idx)
+
+    start, end = _incident_window(day_offset, local_hour, duration_min, to_utc=True)
+    assert start <= reading_ts < end
+    assert start.astimezone(ZoneInfo(C.LOCAL_TIMEZONE)).hour == int(local_hour)
+
+
+def test_bronze_incidents_converts_its_local_clock_to_utc():
+    """The transformation itself must do the conversion, not just the model."""
+    root = Path(__file__).resolve().parents[1]
+    incidents = (
+        root / "pipelines/synthetic_traffic/transformations/bronze_incidents.py"
+    ).read_text()
+
+    assert 'to_utc_timestamp("_local_start_ts"' in incidents
+    # end_ts is derived from the converted start_ts, so it inherits the fix.
+    assert 'timestampadd(MINUTE, duration_min, start_ts)' in incidents
+    # The naive literal must not be assigned straight to start_ts any more.
+    assert 'F.col("start_ts")' not in incidents.split("def bronze_incidents")[0]

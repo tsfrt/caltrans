@@ -19,10 +19,9 @@ geometry codec. If a future runtime lacked ST_*, dropping the `geom` column
 alone would degrade this table gracefully.
 """
 
+from caltrans_traffic import config as C
 from pyspark import pipelines as dp
 from pyspark.sql import functions as F
-
-from caltrans_traffic import config as C
 
 
 @dp.materialized_view(

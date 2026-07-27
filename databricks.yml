@@ -1,0 +1,37 @@
+bundle:
+  name: caltrans-synthetic-traffic
+
+include:
+  - resources/*.yml
+
+variables:
+  catalog:
+    description: Unity Catalog catalog that the pipeline writes to.
+    default: lanl
+  schema:
+    description: Schema holding the bronze/silver/gold traffic tables.
+    default: caltrans_traffic
+
+targets:
+  # Default target. Uses development mode so reruns are fast and tables can be
+  # replaced while iterating on the generation model.
+  dev:
+    default: true
+    mode: development
+    workspace:
+      host: https://fevm-serverless-stable-blj52t.cloud.databricks.com
+    variables:
+      catalog: lanl
+      schema: caltrans_traffic
+
+  prod:
+    mode: production
+    workspace:
+      host: https://fevm-serverless-stable-blj52t.cloud.databricks.com
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      catalog: lanl
+      schema: caltrans_traffic
+    permissions:
+      - user_name: ${workspace.current_user.userName}
+        level: CAN_MANAGE

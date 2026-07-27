@@ -447,3 +447,45 @@ npx eslint server/scenario               clean
 * **No AppKit typegen run** for the two new queries — it needs warehouse
   credentials at build time. The hand-written types in
   `server/scenario/contract.ts` mirror the SQL column list.
+
+---
+
+## 9. Reconciling with the lever UI (PR #7)
+
+The lever UI and this engine were built in parallel with no shared contract and
+landed on **genuinely different request shapes**. Both are reasonable; neither is
+a superset. `server/scenario/ui-adapter.ts` translates, and every lossy step is
+reported in `warnings` rather than hidden.
+
+| | Lever UI (`client/src/lib/scenario.ts`) | This engine |
+|---|---|---|
+| Levers | `levers: ScenarioLever[]` — a stackable union | one optional object per lever KIND |
+| Targeting | a single `stationId` | postmile window on freeway+direction |
+| Incident time | `startBucket` + `durationBuckets` | inclusive `fromBucket`..`toBucket` |
+| Capacity | absolute `capacityVph` only | add-lanes, multiplier, or absolute |
+| Severity | scales speed **directly** (0.88/0.72/0.55/0.38) | metadata only — speed follows from capacity via BPR |
+| Matrix | 96 buckets, `number[]` per metric | 4 windows of packed integer strings |
+
+**The engine takes one lever per kind because DBSQL cannot bind a variable-length
+list** — each kind maps to a fixed parameter set. The adapter folds multiples into
+the postmile hull covering all of them, taking the **max** effect (folding by max
+cannot under-report impact; summing would invent a closure wider than asked for).
+Levers of one kind spread across *different corridors* **throw** rather than
+modelling only the first: a scenario that silently drops a lever is
+indistinguishable from one that worked.
+
+**Two differences the UI must expect, not just tolerate:**
+
+1. **Severity means something different.** The mock scales speed directly; the
+   engine derives the speed effect from the capacity loss `lanesBlocked` causes.
+   Same lever, different number. Warned on every incident translation.
+2. **The matrix is not converted server-side.** The UI's `number[]` shape for 96
+   buckets is the exact form M1 measured at **9,540,471 B (9.10 MiB)** — 9× over
+   AppKit's 1 MiB event cap. The client already decodes packed strings for the M1
+   baseline matrix (`client/src/lib/frames.ts`) and the scenario matrix uses M1's
+   identical encoding, so `ScenarioRunResponse.matrix` should be relaxed to the
+   packed form rather than the engine inflating it.
+
+The UI asked the engine to "declare which pair it used in
+`ScenarioRunResponse.model`". `engineModel()` answers exactly that, and the UI
+should render it **verbatim** rather than assuming.

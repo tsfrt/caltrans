@@ -19,9 +19,9 @@ Everything in this section was empirically confirmed against the live workspace,
 | Model Serving / AI Gateway | ✅ Enabled | 44 endpoints: 39 chat FM, 3 embedding, 2 agent. |
 | Writable UC target | ✅ `lanl.caltrans_traffic` | `CREATE SCHEMA` in `lanl` succeeded. Schema created. |
 | California traffic data | ❌ **Does not exist** | Zero Caltrans/PeMS/detector/road-network tables in any catalog. |
-| Lakebase | ❌ **No instance** | Both `postgres list-projects` and legacy `database list-database-instances` empty. Must be provisioned. |
+| Lakebase | ✅ **Provisioned** | `projects/caltrans-app`, Postgres 17.10, 0.5–2 CU. Schema `app` applied and smoke-tested. See `lakebase/README.md`. |
 | UC REST API | ❌ Denied for our identity | `catalogs list` → "Access denied to clusters that don't have Unity Catalog enabled". |
-| GitHub push | ❌ No credentials | No `gh` CLI, no push creds. PRs cannot be opened from this environment. |
+| GitHub push | ✅ Working | Classic token with `repo` scope + `gh auth setup-git`. `main` pushed. |
 
 ### 1.1 Hard constraints discovered
 
@@ -33,8 +33,10 @@ These are non-obvious and would otherwise be rediscovered the hard way.
 4. **H3 functions take WKT string/binary, never `GEOGRAPHY`.** Wrap with `ST_AsText()`. `h3_center` does not exist — use `h3_centeraswkt`.
 5. **All DDL and metadata discovery must go through SQL** (`information_schema`, `SHOW`), because the UC REST API is denied.
 6. **Apps enforce a non-configurable 120-second request timeout**, and SSE may be buffered by the reverse proxy. Long-running work must not sit inside one request.
-7. **Lakebase credentials expire in ~1 hour.** Never use a PAT as the Postgres password; recycle physical connections at ~45 min (`max_lifetime=2700`) or mint per-connection.
-8. **Deploy the app *before* initializing Lakebase schemas**, or the app service principal won't own them → `permission denied (42501)`.
+7. **Lakebase credentials expire in ~1 hour** (verified: minted 14:09Z → expires 15:09Z). Never use a PAT as the Postgres password; recycle physical connections at ~45 min (`max_lifetime=2700`) or mint per-connection.
+8. **Deploy the app *before* initializing Lakebase schemas**, or the app service principal won't own them → `permission denied (42501)`. The `app` schema was created by a human user, so the SP needs explicit grants — see `lakebase/README.md`.
+9. **The Lakebase `-pooler` host rejects OAuth tokens** with `SASL authentication failed`. Use the direct endpoint host and pool client-side.
+10. **Lakebase suspend timeout is stuck at 24h** — the beta API rejects every update_mask path for it. The endpoint floors at 0.5 CU and will not scale to zero. Set it in the UI or delete the project when idle.
 
 ---
 
@@ -120,8 +122,8 @@ Generation must be *physically plausible*, not random noise: AM (7–9) and PM (
 
 | # | Risk | Mitigation |
 |---|---|---|
-| R1 | **No GitHub credentials** — PRs cannot be opened; work strands on local branches. | Needs human action: supply creds or accept local-branch delivery. |
-| R2 | **Lakebase does not exist** and costs money to provision (0.5 CU min, scale-to-zero). | Requires explicit human go-ahead before provisioning. |
+| R1 | ~~No GitHub credentials~~ → **RESOLVED**. Classic `repo`-scoped token; `main` pushed. | — |
+| R2 | ~~Lakebase does not exist~~ → **RESOLVED**, but suspend timeout is stuck at 24h so it won't scale to zero (~0.5 CU idle floor). | Set suspend timeout in the UI, or `databricks postgres delete-project projects/caltrans-app` when idle. |
 | R3 | **120s Apps request timeout + SSE buffering** could break streaming narration. | Keep scenario queries well under the limit; verify SSE empirically before committing to streaming UX. |
 | R4 | **Small warehouse** may not sustain 52M-row generation or concurrent demo load. | Parameterize row volume; start at 30 days; pre-aggregate Gold aggressively. |
 | R5 | **Basemap egress** — Apps network egress for external tile providers is unconfirmed. | Self-host a MapLibre style, or verify egress before depending on a CDN. |
@@ -141,7 +143,7 @@ Generation must be *physically plausible*, not random noise: AM (7–9) and PM (
 6. KPI panel: VHT, VMT, worst-N segments, before/after deltas.
 
 **Milestone 3 — persistence + narration**
-7. Provision Lakebase; saved scenarios, config, audit *(gated on R2 approval)*.
+7. ~~Provision Lakebase~~ ✅ done — `app.config`, `app.scenarios`, `app.scenario_runs`, `app.audit` live and smoke-tested. Remaining: wire the app to it.
 8. AI Gateway narration of scenario deltas, streamed into the UI.
 9. Optional: mount `carto.overturemaps_transportation` to snap stations to true highway centerlines.
 
@@ -149,6 +151,12 @@ Generation must be *physically plausible*, not random noise: AM (7–9) and PM (
 
 ## 8. Open decisions needed from the human
 
-1. **Provision Lakebase?** Incurs cost. Blocks Milestone 3.
-2. **GitHub credentials?** Without them there is no PR deliverable.
-3. **Is `lanl` an acceptable home** for the traffic schema, or should a dedicated catalog be created?
+All three prior blockers are resolved:
+
+1. ~~Provision Lakebase?~~ ✅ Approved and provisioned (`projects/caltrans-app`).
+2. ~~GitHub credentials?~~ ✅ Classic `repo` token in place; `main` pushed.
+3. ~~Is `lanl` acceptable?~~ ✅ Confirmed — dedicated schema `lanl.caltrans_traffic`.
+
+Remaining watch items: the Lakebase 24h suspend timeout (idle cost), and
+empirically verifying SSE behaviour through the Apps proxy before committing to
+streamed narration.

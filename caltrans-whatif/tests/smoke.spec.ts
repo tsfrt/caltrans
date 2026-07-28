@@ -61,17 +61,73 @@ test('smoke test - animation controls and live KPIs render from warehouse data',
   await expect(page.getByText('Scenario levers')).toBeVisible();
   await page.getByRole('button', { name: 'Add closure' }).click();
   await expect(page.getByTestId('scenario-summary')).toContainText('Close 1 lane');
-  await expect(page.getByTestId('scenario-caveat')).toContainText('Mocked in the client');
-  await page.getByRole('button', { name: 'Diff' }).click();
-  await expect(page.getByText('Diff: red slower')).toBeVisible();
+
+  // Staging a lever must NOT run the engine: a run is 5 warehouse queries and only
+  // a Run press may spend them. Until then the map is explicitly the baseline, and
+  // the scenario map treatments stay unavailable.
+  await expect(page.getByTestId('scenario-not-run')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Diff' })).toBeDisabled();
 
   // Corridor filter is populated from corridor_options.
   await expect(page.getByTestId('corridor-select')).toBeVisible();
 });
 
+test('smoke test - running the engine produces a real BPR result and a diff map', async ({ page }) => {
+  // A failed bind still lets the UI look fine (the next attempt succeeds), so
+  // assert the query layer reported no error at all. This is what catches an
+  // UNBOUND_SQL_PARAMETER / parameter-validation regression directly rather than
+  // via a symptom.
+  const queryErrors: string[] = [];
+  page.on('console', (msg) => {
+    const text = msg.text();
+    if (msg.type() === 'error' && /useAnalyticsQuery|UNBOUND_SQL_PARAMETER|Invalid value for/.test(text)) {
+      queryErrors.push(text);
+    }
+  });
+
+  await page.goto('/');
+  await expect(page.getByText('Mean speed', { exact: true })).toBeVisible({ timeout: LOAD_TIMEOUT });
+  await expect(page.getByTestId('scenario-builder')).toBeVisible();
+
+  await page.getByRole('button', { name: 'Add closure' }).click();
+  await page.getByTestId('scenario-run').click();
+
+  // 5 real warehouse queries (4 animation windows + the KPI roll-up), each measured
+  // at 2.3-3.7s warm but up to ~25s on a cold Serverless Starter.
+  const engineKpis = page.getByTestId('engine-network-kpis');
+  await expect(engineKpis).toBeVisible({ timeout: LOAD_TIMEOUT });
+
+  // The model block must state which BPR pair actually ran. The UI deliberately
+  // refused to pick between 0.15/4.0 and 0.55/4.5 and required the engine to
+  // declare it; this asserts the declaration is rendered rather than assumed.
+  const model = page.getByTestId('scenario-model');
+  await expect(model).toContainText('alpha=0.55');
+  await expect(model).toContainText('beta=4.5');
+  // ...and that it does not overclaim the reassignment.
+  await expect(model).toContainText('NOT network assignment');
+
+  // Conservation is the audit that makes the reassignment trustworthy: the NETWORK
+  // row is a closed system, so this must be 0.0 vehicles. A non-zero value here is
+  // a real bug, not a rounding artefact.
+  await expect(page.getByTestId('engine-conservation')).toContainText('0.0 veh');
+
+  // A result unlocks the scenario map treatments.
+  await expect(page.getByRole('button', { name: 'Diff' })).toBeEnabled();
+  await page.getByRole('button', { name: 'Diff' }).click();
+  await expect(page.getByText('Diff: red slower')).toBeVisible();
+  await expect(page.getByTestId('traffic-map')).toBeVisible();
+
+  expect(queryErrors, 'no scenario query may fail, even if a later one succeeds').toEqual([]);
+});
+
 test('smoke test - animation advances without querying the warehouse', async ({ page }) => {
   // This is the architectural invariant from docs/ARCHITECTURE.md §3 under test:
   // the clock must advance while the analytics request count stays flat.
+  //
+  // The invariant is about ANIMATION, not about scenarios. Running the engine
+  // legitimately issues 5 queries — that is a user pressing a button, not an
+  // animation frame — so this test covers staging a lever and playing back, and the
+  // test below covers the fact that a run's queries also stop once it completes.
   let analyticsCalls = 0;
   page.on('request', (r) => {
     if (r.url().includes('/api/analytics/query/')) analyticsCalls++;
@@ -87,8 +143,9 @@ test('smoke test - animation advances without querying the warehouse', async ({ 
   });
   await expect(page.getByTestId('scenario-builder')).toBeVisible();
 
+  // Staging a lever must not query at all — that is the whole point of Run being
+  // explicit rather than reactive.
   await page.getByRole('button', { name: 'Add closure' }).click();
-  await page.getByRole('button', { name: 'Diff' }).click();
   await expect(page.getByTestId('scenario-summary')).toContainText('Close 1 lane');
 
   const before = await clock.textContent();
@@ -98,6 +155,62 @@ test('smoke test - animation advances without querying the warehouse', async ({ 
   await expect.poll(() => clock.textContent(), { timeout: 20_000, intervals: [400] }).not.toBe(before);
 
   expect(analyticsCalls).toBe(callsAtStart);
+});
+
+test('smoke test - a scenario run queries once and then animation stays flat again', async ({ page }) => {
+  // The companion to the test above. A run SPENDS queries (5: four 24-bucket
+  // animation windows plus the KPI roll-up) and then must go quiet — the scenario
+  // matrix lives in memory exactly like the baseline, so playing the scenario back
+  // must not re-query any more than playing the baseline does.
+  let analyticsCalls = 0;
+  page.on('request', (r) => {
+    if (r.url().includes('/api/analytics/query/')) analyticsCalls++;
+  });
+
+  await page.goto('/');
+  await expect(page.getByText('Mean speed', { exact: true })).toBeVisible({ timeout: LOAD_TIMEOUT });
+  await expect(page.getByTestId('scenario-builder')).toBeVisible();
+
+  // Count SCENARIO queries specifically, so this cannot be satisfied by the
+  // baseline's own reads.
+  let scenarioCalls = 0;
+  page.on('request', (r) => {
+    if (r.url().includes('/api/analytics/query/scenario')) scenarioCalls++;
+  });
+
+  await page.getByRole('button', { name: 'Add closure' }).click();
+  await expect(page.getByTestId('scenario-summary')).toContainText('Close 1 lane');
+  await page.waitForTimeout(1500);
+
+  // ZERO, not "no more than before". Staging a lever must not touch the warehouse
+  // at all.
+  //
+  // This assertion exists because the first version of this wiring gated the
+  // queries with `parameters: null`, which does NOT suppress them — all five fired
+  // on every lever edit and failed with [UNBOUND_SQL_PARAMETER]. The run still
+  // worked afterwards, so a test that only compared before/after counts passed
+  // while five warehouse calls were being wasted and erroring. Hence: exactly 0.
+  expect(scenarioCalls, 'staging a lever must not query the warehouse').toBe(0);
+
+  const callsBeforeRun = analyticsCalls;
+
+  await page.getByTestId('scenario-run').click();
+  await expect(page.getByTestId('engine-network-kpis')).toBeVisible({ timeout: LOAD_TIMEOUT });
+
+  // The run cost real queries. Asserted as a floor rather than exactly 5 so an
+  // AppKit cache hit on a repeated window cannot make this brittle.
+  expect(analyticsCalls).toBeGreaterThan(callsBeforeRun);
+  expect(scenarioCalls).toBeGreaterThan(0);
+
+  // Now play the SCENARIO back and prove the count is flat again.
+  await page.getByRole('button', { name: 'Diff' }).click();
+  const clock = page.getByTestId('clock-readout');
+  const before = await clock.textContent();
+  const callsAfterRun = analyticsCalls;
+
+  await expect.poll(() => clock.textContent(), { timeout: 20_000, intervals: [400] }).not.toBe(before);
+
+  expect(analyticsCalls).toBe(callsAfterRun);
 });
 
 // ── AI Congestion Advisor ───────────────────────────────────────────────────

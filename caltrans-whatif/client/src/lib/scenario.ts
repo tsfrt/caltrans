@@ -1,5 +1,4 @@
 import {
-  BUCKETS_PER_DAY,
   MINUTES_PER_BUCKET,
   frameSlice,
   losFromSpeedAndVc,
@@ -10,59 +9,53 @@ import {
 import type { StationRow } from './useTrafficData';
 
 /**
- * ┌──────────────────────────────────────────────────────────────────────────────────────┐
- * │ ⚠️  MOCK BOUNDARY — NOTHING BELOW IS A REAL TRAFFIC MODEL.                            │
- * └──────────────────────────────────────────────────────────────────────────────────────┘
+ * Scenario lever vocabulary and the client-side KPI arithmetic over an
+ * already-fetched matrix.
  *
- * CLIENT/SERVER CONTRACT for the M2 engine route, which does NOT exist in this worktree.
- * It is being built in parallel on `polly/whatif-engine` (server/scenario/**, which this
- * branch deliberately does not touch).
+ * ── The model runs in DBSQL ──────────────────────────────────────────────────
+ * This file used to contain `applyMockScenario()`, a hand-tuned piecewise-linear
+ * penalty curve standing in for a traffic model while the engine was built on a
+ * parallel branch. That mock is GONE. Scenarios are now executed by the real M2
+ * engine — BPR volume-delay plus damped MSA reassignment, as one parameterized
+ * DBSQL query — via `useScenarioRun`. See `docs/WHATIF_ENGINE.md`.
  *
- * Expected endpoint once the engine PR lands:
- *   POST /api/scenario/run
- *   body:     ScenarioRunRequest   (this file is the source of truth for the shape)
- *   response: ScenarioRunResponse
+ * What the engine is, stated as plainly as the mock's caveats were:
  *
- * Until then the UI calls applyMockScenario(), a deliberately crude client-side stand-in.
- * It exists to exercise the lever composition, the before/after KPI panel and the diff map
- * WITHOUT adding a warehouse round-trip, so the M1 invariant (12 requests, nothing queried
- * during animation) is preserved exactly. Swapping in the real route means replacing that
- * one call; every consumer already reads the FrameMatrix contract.
+ *   • BPR volume-delay with alpha=0.55 beta=4.5, the DATA GENERATOR's
+ *     coefficients. Not the textbook 0.15/4.0 and not the Lakebase `app.config`
+ *     seed (which still holds the textbook pair and is stale). The engine is
+ *     INCREMENTAL — it divides one BPR factor by another — so the coefficients
+ *     must be the ones that produced the data. `engineModel()` in
+ *     ./scenarioAdapter declares this and the KPI panel renders it verbatim.
  *
- * WHAT THE MOCK IS NOT:
- *   - It is NOT the BPR volume-delay function. speedFromVc() below is a piecewise-linear
- *     penalty with hand-picked constants, chosen to move in the right DIRECTION under load,
- *     not to be numerically defensible. Do not read its output as a prediction.
- *   - It does NOT reassign demand across routes. There is no road-network graph in this
- *     dataset -- only detector stations along 10 corridors with postmiles -- so a closure
- *     cannot divert traffic to a parallel road. Displaced demand simply stays put.
- *   - It does NOT propagate congestion upstream/downstream. Effects are per-station.
+ *   • It DOES reassign demand, but that is NOT network assignment. There is no
+ *     road graph in this data — 2,022 point detectors on 10 corridors with
+ *     postmiles, no ramps as edges, no OD matrix. Over-capacity demand moves to
+ *     parallel corridors within 8 km and 45° of heading, to adjacent
+ *     same-corridor segments, or off-network. Only 27% of stations (551 of 2,022)
+ *     have any parallel alternative, and every KPI row reports
+ *     `stations_with_alternative` so a scenario cannot imply otherwise.
  *
- * ⚠️ BPR COEFFICIENT CONFLICT, UNRESOLVED UPSTREAM. Two authorities disagree:
- *      Lakebase app.config seeds  alpha = 0.15, beta = 4.0   (the textbook BPR defaults)
- *      the data generator used    alpha = 0.55, beta = 4.5   (what actually shaped this data)
- *    This UI picks NEITHER, because picking one silently would launder a real disagreement
- *    into a number on a dashboard. The mock uses its own clearly-labelled non-BPR penalty,
- *    and `MOCK_MODEL` below is what the panel shows the user. When the engine lands it must
- *    declare which pair it used in ScenarioRunResponse.model, and the UI should surface that
- *    verbatim rather than assuming. Whoever resolves the conflict should note that 0.55/4.5
- *    is the pair consistent with the observed vc/speed relationship in gold_map_frames.
+ *   • MSA is damped over 4 iterations and has NOT converged there (still moving
+ *     ~15% per step, measured). Read results as direction and magnitude.
  *
- * ⚠️ v/c SCALING. Congestion visuals key off DEMAND-based vc_ratio (max 7.31, p99 1.14 as
- *    measured), never `served_vc_ratio`, which is hard-capped at exactly 1.0 since the *1.02
- *    detector allowance was removed in PR #2 and therefore carries no signal above capacity.
- *    Because demand v/c is that skewed, nothing here may key a CONTINUOUS colour or size
- *    scale on it unclamped -- one outlier would flatten the whole ramp. Colour comes from
- *    speedToColor(), which clamps (65-speed)/45 into [0,1]. v/c is used only for COUNTING
- *    (v/c > 1) and for the LOS threshold, neither of which is a continuous scale.
+ *   • With no lever set the engine is a PROVABLE no-op: v/c, demand and LOS are
+ *     bit-identical to `gold_map_frames`, speed and delay to double epsilon. That
+ *     is what makes M1's baseline matrix a legitimate "before" side for the diff,
+ *     and it is why the sentinel discipline in ./scenarioParams is load-bearing.
+ *
+ * ⚠️ v/c SCALING, unchanged and still important. Congestion visuals key off
+ *    DEMAND-based vc_ratio (max 7.8163, p99 1.147 as measured), never
+ *    `served_vc_ratio`, which is hard-capped at exactly 1.0 and therefore carries
+ *    no signal above capacity. Because demand v/c is that skewed, nothing here may
+ *    key a CONTINUOUS colour or size scale on it unclamped — one outlier would
+ *    flatten the whole ramp. Colour comes from speedToColor(), which clamps
+ *    (65-speed)/45 into [0,1]. v/c is used only for COUNTING (v/c > 1) and for the
+ *    LOS threshold, neither of which is a continuous scale.
  */
 
-/** What the UI tells the user it is running. Kept next to the caveats it describes. */
-export const MOCK_MODEL = {
-  name: 'client-mock-not-bpr',
-  reassignment: 'none-no-network-graph',
-  bprCoefficients: 'not-used (upstream conflict: 0.15/4.0 seeded vs 0.55/4.5 generated)',
-} as const;
+export type ScenarioLever = ClosureLever | DemandDeltaLever | IncidentLever | CapacityChangeLever;
+
 export interface ScenarioRunRequest {
   schemaVersion: 'm2-scenario-v1';
   day: string;
@@ -77,28 +70,6 @@ export interface ScenarioRunRequest {
     includeWorstCorridors: true;
   };
 }
-
-export interface ScenarioRunResponse {
-  schemaVersion: 'm2-scenario-v1';
-  runId: string;
-  model: {
-    name: 'bpr-volume-delay';
-    caveat: string;
-    reassignment: 'corridor-postmile-simplified';
-  };
-  matrix: {
-    stationOrder: string[];
-    bucketCount: 96;
-    flow: number[];
-    speed: number[];
-    vc: number[];
-    incident: number[];
-  };
-  kpisByBucket: ScenarioBucketKpis[];
-  warnings: string[];
-}
-
-export type ScenarioLever = ClosureLever | DemandDeltaLever | IncidentLever | CapacityChangeLever;
 
 export interface ScenarioTarget {
   stationId: string;
@@ -130,6 +101,12 @@ export interface IncidentLever {
   startBucket: number;
   durationBuckets: number;
   lanesBlocked: number;
+  /**
+   * HCM severity 1..4. ⚠️ METADATA ONLY in the engine: the speed effect is derived
+   * from the capacity loss `lanesBlocked` causes, routed through BPR. The old mock
+   * scaled speed directly by severity, so the same lever reports a different
+   * number now. Warned about on every incident translation.
+   */
   severity: 1 | 2 | 3 | 4;
 }
 
@@ -145,13 +122,6 @@ export interface ScenarioBucketKpis extends FrameKpis {
   vmt: number;
 }
 
-export interface ScenarioSummary {
-  request: ScenarioRunRequest;
-  matrix: FrameMatrix;
-  warnings: string[];
-  mocked: true;
-}
-
 export interface CorridorDeltaStat extends CorridorStat {
   scenarioMeanSpeed: number;
   speedDelta: number;
@@ -160,14 +130,6 @@ export interface CorridorDeltaStat extends CorridorStat {
 interface StationDistance {
   miles: number;
 }
-
-const MIN_CAPACITY_VPH = 250;
-const INCIDENT_SPEED_FACTOR: Record<IncidentLever['severity'], number> = {
-  1: 0.88,
-  2: 0.72,
-  3: 0.55,
-  4: 0.38,
-};
 
 export function scenarioTargetFromStation(station: StationRow): ScenarioTarget {
   const postmile = Number(station.postmile);
@@ -194,45 +156,18 @@ export function createScenarioRequest(day: string, freeway: string, levers: Scen
   };
 }
 
-export function applyMockScenario(
-  baseline: FrameMatrix,
-  stations: StationRow[],
-  request: ScenarioRunRequest
-): ScenarioSummary {
-  const matrix = cloneMatrix(baseline);
-  const stationIndex = new Map(stations.map((station, index) => [station.station_id, index]));
-  const distances = estimateStationDistances(stations);
-  // Shown verbatim in ScenarioKpiPanel's "Model caveat" block, next to the numbers they
-  // qualify. Deliberately blunt: these deltas are directional illustrations, not forecasts.
-  const warnings = [
-    'Mocked in the client — no traffic model has run. POST /api/scenario/run (the BPR engine) is not wired up yet.',
-    'Not BPR: speeds come from a hand-tuned penalty curve, chosen to move in the right direction under load, not to be numerically accurate.',
-    'No demand reassignment: this data has no road-network graph — only detector stations along 10 corridors with postmiles — so a closure cannot divert traffic to a parallel route. Displaced demand stays put and effects do not propagate up- or downstream.',
-    'BPR coefficients are in conflict upstream (0.15/4.0 seeded in Lakebase vs 0.55/4.5 used by the data generator); this mock uses neither rather than picking one silently.',
-  ];
-
-  for (const lever of request.levers) {
-    if (lever.type === 'demand_delta') {
-      applyDemandDelta(matrix, stations, lever, distances);
-      continue;
-    }
-
-    const targetIndex = stationIndex.get(lever.target.stationId);
-    if (targetIndex === undefined) {
-      warnings.push(
-        `Skipped ${lever.type}: target station ${lever.target.stationId} is outside the current corridor filter.`
-      );
-      continue;
-    }
-
-    if (lever.type === 'closure') applyClosure(matrix, stations[targetIndex], targetIndex, lever, distances);
-    if (lever.type === 'incident') applyIncident(matrix, stations[targetIndex], targetIndex, lever, distances);
-    if (lever.type === 'capacity_change') applyCapacityChange(matrix, targetIndex, lever);
-  }
-
-  return { request, matrix, warnings, mocked: true };
-}
-
+/**
+ * Per-bucket KPIs over a matrix already in memory.
+ *
+ * Deliberately computed here rather than read from `scenario_kpis`: the engine's
+ * NETWORK/CORRIDOR rows are WHOLE-DAY aggregates, and this panel reports the
+ * clock's current 15-minute bucket. The two are not comparable, and showing a
+ * whole-day total next to a moving clock would misread as a per-bucket number.
+ * The engine's roll-up is used for the worst-segment list and the conservation
+ * audit, where whole-day is the right frame.
+ *
+ * O(stationCount) over a contiguous span, so it is safe to run every tick.
+ */
 export function computeScenarioKpis(matrix: FrameMatrix, stations: StationRow[], bucket: number): ScenarioBucketKpis {
   const base = computeFrameLikeKpis(matrix, bucket);
   const distances = estimateStationDistances(stations);
@@ -255,7 +190,7 @@ export function computeWorstCorridorDeltas(
   scenario: FrameMatrix,
   stations: StationRow[],
   bucket: number,
-  limit = 5
+  limit = 5,
 ): CorridorDeltaStat[] {
   const base = rollupCorridors(baseline, stations, bucket);
   const changed = rollupCorridors(scenario, stations, bucket);
@@ -330,138 +265,14 @@ function computeFrameLikeKpis(matrix: FrameMatrix, bucket: number): FrameKpis {
   };
 }
 
-function cloneMatrix(source: FrameMatrix): FrameMatrix {
-  return {
-    stationCount: source.stationCount,
-    bucketCount: source.bucketCount,
-    flow: new Int32Array(source.flow),
-    speed: new Float32Array(source.speed),
-    vc: new Float32Array(source.vc),
-    incident: new Uint8Array(source.incident),
-    bucketsLoaded: [...source.bucketsLoaded],
-  };
-}
-
-function applyDemandDelta(
-  matrix: FrameMatrix,
-  stations: StationRow[],
-  lever: DemandDeltaLever,
-  distances: StationDistance[]
-): void {
-  const factor = Math.max(0.25, 1 + lever.percent / 100);
-  for (let i = 0; i < stations.length; i++) {
-    const station = stations[i];
-    if (station.freeway !== lever.freeway || station.direction !== lever.direction) continue;
-    forEachBucket(matrix, i, (offset) => {
-      matrix.flow[offset] = Math.round(matrix.flow[offset] * factor);
-      recomputeVcAndSpeed(matrix, offset, capacityForStation(station), distances[i], 1, 1);
-    });
-  }
-}
-
-function applyClosure(
-  matrix: FrameMatrix,
-  station: StationRow,
-  stationIndex: number,
-  lever: ClosureLever,
-  distances: StationDistance[]
-): void {
-  const lanes = Math.max(1, Number(station.baseline_lanes || station.num_lanes || 1));
-  const laneFactor = Math.max(0.08, (lanes - lever.lanesClosed) / lanes);
-  applyLocalCapacityFactor(matrix, station, stationIndex, distances, laneFactor, 1);
-}
-
-function applyIncident(
-  matrix: FrameMatrix,
-  station: StationRow,
-  stationIndex: number,
-  lever: IncidentLever,
-  distances: StationDistance[]
-): void {
-  const lanes = Math.max(1, Number(station.baseline_lanes || station.num_lanes || 1));
-  const laneFactor = Math.max(0.05, (lanes - lever.lanesBlocked) / lanes);
-  const speedFactor = INCIDENT_SPEED_FACTOR[lever.severity];
-  const endBucket = Math.min(BUCKETS_PER_DAY, lever.startBucket + lever.durationBuckets);
-
-  for (let bucket = lever.startBucket; bucket < endBucket; bucket++) {
-    const offset = bucket * matrix.stationCount + stationIndex;
-    matrix.incident[offset] = Math.max(matrix.incident[offset], lever.severity);
-    recomputeVcAndSpeed(matrix, offset, capacityForStation(station), distances[stationIndex], laneFactor, speedFactor);
-  }
-}
-
-function applyCapacityChange(matrix: FrameMatrix, stationIndex: number, lever: CapacityChangeLever): void {
-  const capacity = Math.max(MIN_CAPACITY_VPH, lever.capacityVph);
-  forEachBucket(matrix, stationIndex, (offset) => {
-    matrix.vc[offset] = matrix.flow[offset] / capacity;
-    matrix.speed[offset] = speedFromVc(matrix.vc[offset], matrix.speed[offset], 1);
-  });
-}
-
-function applyLocalCapacityFactor(
-  matrix: FrameMatrix,
-  station: StationRow,
-  stationIndex: number,
-  distances: StationDistance[],
-  capacityFactor: number,
-  speedFactor: number
-): void {
-  forEachBucket(matrix, stationIndex, (offset) => {
-    recomputeVcAndSpeed(
-      matrix,
-      offset,
-      capacityForStation(station),
-      distances[stationIndex],
-      capacityFactor,
-      speedFactor
-    );
-  });
-}
-
-function recomputeVcAndSpeed(
-  matrix: FrameMatrix,
-  offset: number,
-  baselineCapacity: number,
-  _distance: StationDistance,
-  capacityFactor: number,
-  speedFactor: number
-): void {
-  const effectiveCapacity = Math.max(MIN_CAPACITY_VPH, baselineCapacity * capacityFactor);
-  matrix.vc[offset] = matrix.flow[offset] / effectiveCapacity;
-  matrix.speed[offset] = speedFromVc(matrix.vc[offset], matrix.speed[offset], speedFactor);
-}
-
 /**
- * Speed under a perturbed v/c. NOT the BPR function -- see the MOCK BOUNDARY header.
+ * Per-station segment length, as a postmile Voronoi over each carriageway.
  *
- * `vc` is DEMAND-based and genuinely reaches 7.31 in this dataset while p99 is only 1.14, so
- * the penalty terms are clamped at VC_PENALTY_CEILING before use. Without that clamp a single
- * outlier station drives `congestionPenalty` past 200, every branch saturates at the 3 mph
- * floor, and a v/c of 7.3 becomes visually indistinguishable from one of 1.5 -- the same
- * flattening the colour scale avoids by keying on clamped speed instead of raw v/c.
+ * ⚠️ VMT/VHT computed from these inherit the detector spacing, and the engine's
+ * own SQL derives segment lengths the same way (clamped to [0.05, 12] mi). So
+ * these numbers are consistent with the engine's, but both are a function of where
+ * the detectors happen to be.
  */
-const VC_PENALTY_CEILING = 2.5;
-
-function speedFromVc(vc: number, currentSpeed: number, speedFactor: number): number {
-  if (Number.isNaN(currentSpeed)) return currentSpeed;
-  const effectiveVc = Math.min(Math.max(vc, 0), VC_PENALTY_CEILING);
-  const congestionPenalty =
-    Math.max(0, effectiveVc - 0.72) * 34 + Math.max(0, effectiveVc - 1) * 24;
-  const cappedSpeed = Math.max(4, Math.min(currentSpeed, 67 - congestionPenalty));
-  return Math.max(3, cappedSpeed * speedFactor);
-}
-
-function forEachBucket(matrix: FrameMatrix, stationIndex: number, fn: (offset: number) => void): void {
-  for (let bucket = 0; bucket < matrix.bucketCount; bucket++) {
-    fn(bucket * matrix.stationCount + stationIndex);
-  }
-}
-
-function capacityForStation(station: StationRow): number {
-  const lanes = Number(station.baseline_lanes || station.num_lanes || 1);
-  return Math.max(MIN_CAPACITY_VPH, Number(station.baseline_capacity_vph) || lanes * 1900);
-}
-
 function estimateStationDistances(stations: StationRow[]): StationDistance[] {
   const byCorridor = new Map<string, number[]>();
   for (let i = 0; i < stations.length; i++) {
@@ -516,7 +327,7 @@ function rollupCorridors(matrix: FrameMatrix, stations: StationRow[], bucket: nu
         totalFlow: item.flow,
         congestedPct: item.n > 0 ? (item.congested / item.n) * 100 : 0,
       },
-    ])
+    ]),
   );
 }
 

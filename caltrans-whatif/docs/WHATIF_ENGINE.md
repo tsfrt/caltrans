@@ -16,9 +16,13 @@ parameters and forwards rows; it does no traffic math.
 | `tools/scenario_sql/render.py` | Writes both `.sql` files from it |
 | `config/queries/scenario_time_matrix.sql` | **Generated.** Map payload |
 | `config/queries/scenario_kpis.sql` | **Generated.** KPI panel |
-| `server/scenario/` | Validate → bind → execute → decode. No math. |
+| `server/scenario/{contract,params,math}.ts` | The executable spec. Pins the SQL constants against `engine.py`. |
+| `client/src/lib/scenarioParams.ts` | Validate → bind to `sql.*` markers. No math. |
+| `client/src/lib/scenarioAdapter.ts` | Lever UI shape → engine shape. Reports every lossy fold. |
+| `client/src/lib/useScenarioRun.ts` | Calls both queries via `useAnalyticsQuery`. No math. |
 | `tests/test_scenario_sql.py` | 27 tests: drift + structural invariants |
 | `server/scenario/scenario.test.ts` | 61 tests: the arithmetic |
+| `client/src/lib/scenarioAdapter.test.ts` | 26 tests: binding + lever folding |
 
 Both queries embed the **same** engine body, asserted by
 `test_both_queries_embed_the_identical_engine`. If they could drift, the KPI panel
@@ -112,10 +116,11 @@ test rather than repeated.
 `lakebase/schema.sql` seeds `bpr_alpha=0.15` / `bpr_beta=4.0`. Those rows are
 pre-existing and owned by the Lakebase migration (out of scope for this branch —
 see the file-scope note in the PR). The engine therefore takes its coefficients as
-**query parameters** with defaults in `server/scenario/params.ts`, so:
+**query parameters** with defaults in `client/src/lib/scenarioParams.ts` (and
+mirrored in `server/scenario/params.ts`, which the arithmetic tests pin), so:
 
 * the app works correctly today without touching the Lakebase migration;
-* once the seed is corrected to 0.55 / 4.5, the server can read it from
+* once the seed is corrected to 0.55 / 4.5, the client can read it from
   `app.config` and pass it through with no engine change;
 * a test (`test_engine_bpr_defaults_follow_the_generator_not_the_textbook`)
   asserts the defaults follow the generator AND that the conflicting seed still
@@ -425,28 +430,28 @@ corridor-scoped total makes diverted traffic look like it vanished).
 
 ```
 uv run --with pytest pytest -q          144 passed   (27 new + 117 pre-existing)
-npx vitest run server/scenario           61 passed
-npx tsc -b tsconfig.server.json          clean
-npx eslint server/scenario               clean
+npx vitest run                          148 passed   (61 arithmetic + 26 binding + 61 other)
+npm run test:smoke                        9 passed   (live warehouse, real browser)
+npm run typecheck                       clean
+npm run lint                            clean
 ```
+
+The smoke suite runs the engine end to end in a browser: a lever-free Run
+reproduces the baseline (`Conservation error 0.0 veh`) and a closure moves demand
+off-network with conservation still exactly 0.
 
 ---
 
 ## 8. Not done
 
-* **No UI.** The lever panel is a parallel worker's branch. This delivers the
-  engine, the contract and the server binding.
 * **Scenario persistence.** `app.scenarios` / `app.scenario_runs` exist in
-  Lakebase but nothing writes to them from here.
+  Lakebase but nothing writes to them.
 * **The Lakebase `bpr_alpha` / `bpr_beta` seed is still 0.15 / 4.0** — see §2.
   Correcting it belongs to the Lakebase migration, not this branch.
 * **`MAX_ITERS` is still 4** despite the convergence evidence in §5 item 2 and
   latency being flat in iteration count. Raising it is the single highest-value
   follow-up.
 * **No calibration of the reassignment shares.** Not possible with this data.
-* **No AppKit typegen run** for the two new queries — it needs warehouse
-  credentials at build time. The hand-written types in
-  `server/scenario/contract.ts` mirror the SQL column list.
 
 ---
 
@@ -454,8 +459,8 @@ npx eslint server/scenario               clean
 
 The lever UI and this engine were built in parallel with no shared contract and
 landed on **genuinely different request shapes**. Both are reasonable; neither is
-a superset. `server/scenario/ui-adapter.ts` translates, and every lossy step is
-reported in `warnings` rather than hidden.
+a superset. `client/src/lib/scenarioAdapter.ts` translates, and every lossy step
+is reported in `warnings` rather than hidden.
 
 | | Lever UI (`client/src/lib/scenario.ts`) | This engine |
 |---|---|---|
@@ -479,13 +484,38 @@ indistinguishable from one that worked.
 1. **Severity means something different.** The mock scales speed directly; the
    engine derives the speed effect from the capacity loss `lanesBlocked` causes.
    Same lever, different number. Warned on every incident translation.
-2. **The matrix is not converted server-side.** The UI's `number[]` shape for 96
-   buckets is the exact form M1 measured at **9,540,471 B (9.10 MiB)** — 9× over
-   AppKit's 1 MiB event cap. The client already decodes packed strings for the M1
-   baseline matrix (`client/src/lib/frames.ts`) and the scenario matrix uses M1's
-   identical encoding, so `ScenarioRunResponse.matrix` should be relaxed to the
-   packed form rather than the engine inflating it.
+2. **The matrix is never inflated to `number[]`.** That shape for 96 buckets is
+   the exact form M1 measured at **9,540,471 B (9.10 MiB)** — 9× over AppKit's
+   1 MiB event cap. The scenario matrix uses M1's identical encoding, so
+   `useScenarioRun` decodes the four packed windows with M1's own
+   `applyPackedWindow` unchanged.
 
-The UI asked the engine to "declare which pair it used in
-`ScenarioRunResponse.model`". `engineModel()` answers exactly that, and the UI
-should render it **verbatim** rather than assuming.
+The UI asked the engine to declare which BPR pair it used. `engineModel()` answers
+exactly that, and the KPI panel renders it **verbatim** rather than assuming.
+
+### How it is wired
+
+Both queries are in the generated `QueryRegistry`, so the client calls them
+directly through `useAnalyticsQuery` — same SSE transport and per-query cache M1's
+baseline uses. There is no Express route.
+
+Three bugs in the never-executed server binding were found and fixed by wiring it
+up, each confirmed against AppKit's implementation:
+
+1. **`analytics.query()` takes SQL text, not a query key.** Key resolution happens
+   only in AppKit's HTTP route via `app.getAppQuery()`.
+2. **Parameters must be `sql.*` markers.** Raw values throw
+   `Invalid value for day: expected SQL type`.
+3. **The two queries take DIFFERENT 32-parameter sets.** `scenario_time_matrix`
+   references `:from_bucket` and never `:worst_n`; `scenario_kpis` is the reverse.
+   Both declare all 34 in their `-- @param` header (typegen reads that), but
+   AppKit validates against the `:name` occurrences in the SQL BODY and throws on
+   any extra key. DBSQL itself tolerates the extra parameter, which is why
+   SQL-level testing never surfaced it.
+
+A run is **explicit** — 5 queries at a measured 2.3–3.7 s warm — so levers stage
+locally and the warehouse is only touched on **Run scenario**. Gating uses
+`autoStart`, NOT `parameters: null`: null parameters do not hold a query back
+(the hook only skips when serialisation throws), so they fire with no bindings and
+fail with `[UNBOUND_SQL_PARAMETER]`. `tests/smoke.spec.ts` asserts staging fires
+exactly **0** scenario queries.

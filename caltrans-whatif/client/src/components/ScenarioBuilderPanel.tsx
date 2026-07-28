@@ -17,11 +17,34 @@ interface ScenarioBuilderPanelProps {
   stations: StationRow[];
   levers: ScenarioLever[];
   onChange: (levers: ScenarioLever[]) => void;
+  /** Commit the staged levers and run the engine in DBSQL. */
+  onRun: () => void;
+  /** A run is in flight. */
+  running: boolean;
+  /**
+   * The staged levers differ from the ones the last run used, so what the map
+   * currently shows is out of date. Distinguished from "no run yet" so the button
+   * can say which it is.
+   */
+  stale: boolean;
+  /** A run has completed and its result is on the map. */
+  hasResult: boolean;
+  /** Validation or query failure from the last attempt. */
+  error: string | null;
 }
 
 const DIRECTIONS = ['N', 'S', 'E', 'W'] as const;
 
-export function ScenarioBuilderPanel({ stations, levers, onChange }: ScenarioBuilderPanelProps) {
+export function ScenarioBuilderPanel({
+  stations,
+  levers,
+  onChange,
+  onRun,
+  running,
+  stale,
+  hasResult,
+  error,
+}: ScenarioBuilderPanelProps) {
   const [targetId, setTargetId] = useState(stations[0]?.station_id ?? '');
   const [search, setSearch] = useState('');
   const [lanesClosed, setLanesClosed] = useState(1);
@@ -57,6 +80,9 @@ export function ScenarioBuilderPanel({ stations, levers, onChange }: ScenarioBui
     return scenarioTargetFromStation(selectedStation);
   }
 
+  /** Lanes at the selected station, for the over-closing warning. */
+  const targetLanes = Number(selectedStation?.baseline_lanes ?? selectedStation?.num_lanes ?? 0) || 0;
+
   return (
     <Card data-testid="scenario-builder">
       <CardHeader className="pb-2">
@@ -64,7 +90,7 @@ export function ScenarioBuilderPanel({ stations, levers, onChange }: ScenarioBui
           <div>
             <CardTitle className="text-base">Scenario levers</CardTitle>
             <p className="mt-1 text-xs text-muted-foreground">
-              Client mock boundary: compose levers now; engine route swaps in later.
+              Compose levers, then run the BPR engine in DBSQL.
             </p>
           </div>
           <Badge variant={levers.length > 0 ? 'default' : 'secondary'}>{levers.length} active</Badge>
@@ -103,6 +129,17 @@ export function ScenarioBuilderPanel({ stations, levers, onChange }: ScenarioBui
 
         <LeverSection title="1. Segment / station closure">
           <NumberField label="Lanes closed" value={lanesClosed} min={1} max={8} onChange={setLanesClosed} />
+          {/* The engine floors surviving capacity at 5% per station rather than
+              dividing by zero, so closing every lane of a 1-lane ramp is
+              arithmetically answerable but reports v/c 22.3 — a number with no
+              physical meaning. Warn rather than block: the floor is deliberate and
+              the user may be probing it. */}
+          {targetLanes > 0 && lanesClosed >= targetLanes ? (
+            <p className="text-xs text-amber-600 dark:text-amber-400" data-testid="closure-overclose-warning">
+              This station has {targetLanes} lane{targetLanes === 1 ? '' : 's'}. Closing {lanesClosed} leaves the
+              engine&apos;s 5% capacity floor, which reports an extreme v/c rather than a physically meaningful one.
+            </p>
+          ) : null}
           <Button
             type="button"
             size="sm"
@@ -241,6 +278,42 @@ export function ScenarioBuilderPanel({ stations, levers, onChange }: ScenarioBui
               ))}
             </ol>
           )}
+
+          {/* ── Run ──────────────────────────────────────────────────────────
+              Running is EXPLICIT because it costs 5 warehouse queries at a
+              measured 2.3-3.7s warm each. Auto-running on lever change would fire
+              several runs while a user arrow-keys a number field. */}
+          {levers.length > 0 ? (
+            <div className="space-y-2 border-t pt-2">
+              <Button
+                type="button"
+                size="sm"
+                className="w-full"
+                disabled={running}
+                onClick={onRun}
+                data-testid="scenario-run"
+              >
+                {running ? 'Running BPR engine in DBSQL…' : stale && hasResult ? 'Re-run scenario' : 'Run scenario'}
+              </Button>
+              {running ? (
+                <p className="text-xs text-muted-foreground">
+                  5 queries: 4 animation windows + the KPI roll-up. ~3 s warm, up to ~25 s if the warehouse is cold.
+                </p>
+              ) : error ? (
+                <p className="text-xs text-destructive" data-testid="scenario-run-error">
+                  {error}
+                </p>
+              ) : stale && hasResult ? (
+                <p className="text-xs text-amber-600 dark:text-amber-400" data-testid="scenario-stale">
+                  Levers changed since the last run — the map still shows the previous scenario.
+                </p>
+              ) : !hasResult ? (
+                <p className="text-xs text-muted-foreground" data-testid="scenario-not-run">
+                  Not run yet. The map is showing the baseline.
+                </p>
+              ) : null}
+            </div>
+          ) : null}
         </div>
       </CardContent>
     </Card>

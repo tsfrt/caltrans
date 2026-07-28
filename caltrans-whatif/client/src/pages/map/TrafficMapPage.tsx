@@ -19,12 +19,13 @@ import { ScenarioKpiPanel } from '../../components/ScenarioKpiPanel';
 import { TimeControls } from '../../components/TimeControls';
 import { AdvisorPanel } from '../../components/AdvisorPanel';
 import {
-  applyMockScenario,
   computeScenarioKpis,
   computeWorstCorridorDeltas,
   createScenarioRequest,
   type ScenarioLever,
 } from '../../lib/scenario';
+import { engineModel, fromUiRequest } from '../../lib/scenarioAdapter';
+import { scenarioRunKey, useScenarioRun, type CommittedScenario } from '../../lib/useScenarioRun';
 
 /**
  * Default day: a Wednesday. Weekend profiles in this dataset are genuinely flatter
@@ -72,15 +73,45 @@ export function TrafficMapPage() {
     [day, freeway, scenarioLevers],
   );
 
-  const scenario = useMemo(
-    () =>
-      view.matrix && view.stations && scenarioLevers.length > 0
-        ? applyMockScenario(view.matrix, view.stations, scenarioRequest)
-        : null,
-    [view.matrix, view.stations, scenarioRequest, scenarioLevers.length],
-  );
+  /**
+   * What the staged levers WOULD run as. Computed eagerly so the Run button can be
+   * disabled and the error shown before a query is issued: `fromUiRequest` throws
+   * on a lever set the engine cannot express (e.g. closures on two different
+   * corridors), and that is a message the user should see immediately rather than
+   * after a 3-second round trip.
+   */
+  const pending = useMemo(() => {
+    if (scenarioLevers.length === 0) return null;
+    try {
+      const { request, warnings } = fromUiRequest(scenarioRequest);
+      return { committed: { request, warnings, runKey: scenarioRunKey(request) }, error: null };
+    } catch (err) {
+      return { committed: null, error: err instanceof Error ? err.message : String(err) };
+    }
+  }, [scenarioRequest, scenarioLevers.length]);
 
-  const displayMatrix = scenarioMode === 'baseline' || !scenario ? view.matrix : scenario.matrix;
+  /**
+   * The scenario the engine actually ran. Moved ONLY by pressing Run, never by
+   * editing a lever — a run is 5 warehouse queries and must not fire on a
+   * keystroke. `stale` below is the difference between this and `pending`.
+   */
+  const [committed, setCommitted] = useState<CommittedScenario | null>(null);
+
+  const scenario = useScenarioRun(committed, view.stations?.length ?? null);
+  const stale = !!pending?.committed && pending.committed.runKey !== committed?.runKey;
+  const runError = pending?.error ?? scenario.error;
+
+  /**
+   * Drop a committed run when the view it was computed for changes. A scenario is
+   * a function of (day, corridor) as well as of its levers, so keeping the old
+   * matrix would draw one day's scenario over another day's baseline.
+   */
+  useEffect(() => {
+    setCommitted(null);
+  }, [day, freeway]);
+
+  const scenarioMatrix = scenario.matrix;
+  const displayMatrix = scenarioMode === 'baseline' || !scenarioMatrix ? view.matrix : scenarioMatrix;
 
   const baselineKpis = useMemo(
     () =>
@@ -91,27 +122,37 @@ export function TrafficMapPage() {
   );
   const scenarioKpis = useMemo(
     () =>
-      scenario && view.stations
-        ? computeScenarioKpis(scenario.matrix, view.stations, clock.bucket)
+      scenarioMatrix && view.stations
+        ? computeScenarioKpis(scenarioMatrix, view.stations, clock.bucket)
         : null,
-    [scenario, view.stations, clock.bucket],
+    [scenarioMatrix, view.stations, clock.bucket],
   );
   const worstCorridors = useMemo(
     () =>
       view.matrix && view.stations
         ? computeWorstCorridorDeltas(
             view.matrix,
-            scenario?.matrix ?? view.matrix,
+            scenarioMatrix ?? view.matrix,
             view.stations,
             clock.bucket,
           )
         : [],
-    [view.matrix, scenario, view.stations, clock.bucket],
+    [view.matrix, scenarioMatrix, view.stations, clock.bucket],
   );
 
   useEffect(() => {
     if (scenarioLevers.length === 0 && scenarioMode !== 'baseline') setScenarioMode('baseline');
   }, [scenarioLevers.length, scenarioMode]);
+
+  /**
+   * Once a run lands, show it. Without this the user presses Run, waits, and the
+   * map still displays the baseline until they also click a mode button.
+   */
+  useEffect(() => {
+    if (scenarioMatrix && scenarioMode === 'baseline') setScenarioMode('scenario');
+    // Only react to a result arriving, not to the user then choosing Baseline.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scenarioMatrix]);
 
   return (
     <div className="flex h-[calc(100vh-8rem)] flex-col gap-3 lg:flex-row">
@@ -226,7 +267,11 @@ export function TrafficMapPage() {
             worstCorridors={worstCorridors}
             localTime={bucketToLocalTime(clock.bucket)}
             stationCount={view.stations?.length ?? 0}
-            warnings={scenario?.warnings ?? []}
+            warnings={scenario.warnings}
+            // Only claim a model once one has actually run.
+            model={scenario.kpiRows ? engineModel() : null}
+            networkRow={scenario.networkRow}
+            worstSegments={scenario.worstSegments}
           />
         ) : (
           <Skeleton className="h-40 w-full" />
@@ -236,10 +281,14 @@ export function TrafficMapPage() {
           <ScenarioBuilderPanel
             stations={view.stations}
             levers={scenarioLevers}
-            onChange={(next) => {
-              setScenarioLevers(next);
-              if (next.length > 0 && scenarioMode === 'baseline') setScenarioMode('scenario');
+            onChange={setScenarioLevers}
+            onRun={() => {
+              if (pending?.committed) setCommitted(pending.committed);
             }}
+            running={scenario.loading}
+            stale={stale}
+            hasResult={!!scenarioMatrix}
+            error={runError}
           />
         ) : null}
 
@@ -259,18 +308,19 @@ export function TrafficMapPage() {
               value="scenario"
               mode={scenarioMode}
               onChange={setScenarioMode}
-              disabled={!scenario}
+              disabled={!scenarioMatrix}
             />
             <ModeButton
               label="Diff"
               value="diff"
               mode={scenarioMode}
               onChange={setScenarioMode}
-              disabled={!scenario}
+              disabled={!scenarioMatrix}
             />
           </div>
           <p className="text-xs text-muted-foreground">
-            All three modes reuse the in-memory 24h matrix; scrubbing and playback do not query DBSQL.
+            All three modes reuse the in-memory 24h matrix; scrubbing and playback do not query DBSQL. The engine runs
+            only when you press Run.
           </p>
         </div>
 

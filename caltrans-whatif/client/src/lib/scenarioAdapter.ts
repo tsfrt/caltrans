@@ -1,25 +1,27 @@
 /**
- * Adapter: the lever UI's `ScenarioRunRequest` → this engine's `ScenarioRequest`.
+ * Adapter: the lever UI's stackable `ScenarioLever[]` → the engine's request shape.
  *
  * ── Why this file exists ─────────────────────────────────────────────────────
- * The lever UI (PR #7, `client/src/lib/scenario.ts`) and this engine were built
- * in parallel against no shared contract, and they landed on genuinely different
- * shapes. Both are reasonable; neither is a superset of the other. Rather than
- * change the UI (already merged, and out of this branch's file scope) or bend the
- * engine's parameter surface to a shape that does not fit DBSQL binding, the
- * translation is explicit and tested here.
+ * The lever UI and the engine were built in parallel against no shared contract
+ * and landed on genuinely different shapes. Both are reasonable; neither is a
+ * superset of the other. The translation is explicit and tested here rather than
+ * bending either side.
+ *
+ * (Ported from `server/scenario/ui-adapter.ts`. It moved to the client because
+ * both engine queries are in the generated `QueryRegistry`, so the client calls
+ * them directly through `useAnalyticsQuery` and no server route sits in between.
+ * The logic and its tests are unchanged.)
  *
  * ── The differences, and how each is resolved ────────────────────────────────
  *
- * 1. LEVER SHAPE. The UI sends `levers: ScenarioLever[]` — a discriminated union,
+ * 1. LEVER SHAPE. The UI holds `levers: ScenarioLever[]` — a discriminated union,
  *    each with its own `id`, so a user can stack several closures. The engine
  *    takes ONE optional object per lever KIND, because each kind maps to a fixed
  *    set of SQL parameters and DBSQL cannot bind a variable-length list.
  *    → Resolved by folding: multiple levers of the same kind are merged into the
  *      postmile hull that covers all of them, and the widest effect wins. This is
- *      LOSSY and it is reported, not hidden: `ScenarioAdapterResult.warnings`
- *      names every fold, and the UI's own response type already has a `warnings`
- *      field to surface them in.
+ *      LOSSY and it is reported, not hidden: `warnings` names every fold and the
+ *      KPI panel renders them.
  *
  * 2. TARGETING. The UI targets a single `stationId`. The engine targets a
  *    postmile window on a freeway+direction, because that is what makes a
@@ -43,29 +45,15 @@
  *    → Absolute maps straight through. The other two are simply unreachable from
  *      the current UI; that is a UI limitation, not an engine one.
  *
- * 5. SEVERITY. The UI's mock uses severity to scale speed DIRECTLY
- *    (`INCIDENT_SPEED_FACTOR`, 0.88/0.72/0.55/0.38). The engine does not: it
- *    derives the speed effect from the capacity loss that `lanesBlocked` causes,
- *    via BPR. Severity is carried through as metadata only.
- *    → This is a REAL behavioural difference the UI should expect. Same lever,
- *      different number, because the engine routes the effect through capacity
- *      and the mock short-circuits to speed. Warned about explicitly.
- *
- * 6. RESPONSE SHAPE. The UI expects one response covering all 96 buckets with
- *    `flow`/`speed`/`vc`/`incident` as `number[]`. The engine returns four
- *    24-bucket windows of comma-separated integer strings.
- *    → NOT adapted here, deliberately. See
- *      `UI_MATRIX_ADAPTER_NOT_PROVIDED` at the bottom of this file for why the
- *      conversion is cheap on the client and expensive to do server-side.
- *
- * 7. THE BPR CONFLICT. The UI explicitly refuses to pick between 0.15/4.0 and
- *    0.55/4.5, and asks the engine to "declare which pair it used in
- *    ScenarioRunResponse.model". That is the right instinct, and `engineModel()`
- *    below answers it in exactly that field.
+ * 5. SEVERITY. The UI's old mock used severity to scale speed DIRECTLY
+ *    (0.88/0.72/0.55/0.38). The engine does not: it derives the speed effect from
+ *    the capacity loss that `lanesBlocked` causes, via BPR. Severity is carried
+ *    through as metadata only.
+ *    → A REAL behavioural difference, warned about explicitly, because anyone who
+ *      saw the mock's numbers will see different ones now.
  */
 
-import type { ScenarioRequest } from './contract.js';
-import { BUCKETS_PER_DAY, MAX_ITERATIONS } from './params.js';
+import { BUCKETS_PER_DAY, MAX_ITERATIONS, type ScenarioRequest } from './scenarioParams';
 
 /**
  * Half-width (miles) of the postmile window built around a station target.
@@ -106,22 +94,25 @@ export interface UiScenarioRunRequest {
 
 export interface ScenarioAdapterResult {
   request: ScenarioRequest;
-  /** Every lossy translation, in the UI's own `warnings` vocabulary. */
+  /** Every lossy translation, for the KPI panel to render. */
   warnings: string[];
 }
 
-/** `ScenarioRunResponse.model` — answers the UI's "declare which pair you used". */
+/**
+ * What the UI tells the user it ran. Rendered VERBATIM — the old mock's header
+ * asked for exactly this: "When the engine lands it must declare which pair it
+ * used, and the UI should surface that verbatim rather than assuming."
+ */
 export function engineModel() {
   return {
     name: 'bpr-volume-delay' as const,
     reassignment: 'corridor-postmile-simplified' as const,
     /**
-     * The UI asked for this verbatim and should render it verbatim. It resolves
-     * the conflict the UI correctly refused to launder: 0.55/4.5 wins because
-     * this engine is INCREMENTAL — it divides one BPR factor by another, so the
-     * coefficients must be the ones that produced the data or every scenario
-     * measures a change against a curve the baseline was never on. The Lakebase
-     * `app.config` seed of 0.15/4.0 is stale.
+     * Resolves the conflict the UI correctly refused to launder: 0.55/4.5 wins
+     * because this engine is INCREMENTAL — it divides one BPR factor by another,
+     * so the coefficients must be the ones that produced the data or every
+     * scenario measures a change against a curve the baseline was never on. The
+     * Lakebase `app.config` seed of 0.15/4.0 is stale.
      */
     bprCoefficients:
       'alpha=0.55 beta=4.5 (data-generator values; Lakebase app.config seed of 0.15/4.0 is stale and NOT used)',
@@ -180,7 +171,7 @@ export function fromUiRequest(ui: UiScenarioRunRequest): ScenarioAdapterResult {
     if (!sameCarriageway(targets)) {
       throw new Error(
         'closure levers span more than one freeway+direction; the engine models one ' +
-          'closure target per run. Split into separate scenario runs.'
+          'closure target per run. Split into separate scenario runs.',
       );
     }
     if (closures.length > 1) warnings.push(foldNote('closure', closures.length));
@@ -203,7 +194,7 @@ export function fromUiRequest(ui: UiScenarioRunRequest): ScenarioAdapterResult {
     if (demands.length > 1) {
       warnings.push(
         `${demands.length} demand levers were combined multiplicatively into one percentage; ` +
-          `the engine applies one demand delta per run.`
+          `the engine applies one demand delta per run.`,
       );
     }
     // Multiplicative, not additive: +10% then +10% is +21%, not +20%.
@@ -217,12 +208,12 @@ export function fromUiRequest(ui: UiScenarioRunRequest): ScenarioAdapterResult {
         ? demands[0].percent
         : (demands.reduce((acc, d) => acc * (1 + d.percent / 100), 1) - 1) * 100;
     const spansCorridors = demands.some(
-      (d) => d.freeway !== demands[0].freeway || d.direction !== demands[0].direction
+      (d) => d.freeway !== demands[0].freeway || d.direction !== demands[0].direction,
     );
     if (spansCorridors) {
       warnings.push(
         'demand levers targeted different corridors and were widened to ALL corridors, ' +
-          'which applies the delta network-wide rather than per corridor.'
+          'which applies the delta network-wide rather than per corridor.',
       );
     }
     if (Math.abs(percent) < 1e-9) {
@@ -243,7 +234,7 @@ export function fromUiRequest(ui: UiScenarioRunRequest): ScenarioAdapterResult {
     if (!sameCarriageway(targets)) {
       throw new Error(
         'incident levers span more than one freeway+direction; the engine models one ' +
-          'incident target per run. Split into separate scenario runs.'
+          'incident target per run. Split into separate scenario runs.',
       );
     }
     if (incidents.length > 1) warnings.push(foldNote('incident', incidents.length));
@@ -254,14 +245,15 @@ export function fromUiRequest(ui: UiScenarioRunRequest): ScenarioAdapterResult {
     if (rawTo > toBucket) {
       warnings.push(
         `incident duration ran past midnight (bucket ${rawTo}) and was truncated at bucket ` +
-          `${toBucket}; the engine models one Pacific-local day and does not wrap.`
+          `${toBucket}; the engine models one Pacific-local day and does not wrap.`,
       );
     }
     const severity = Math.max(...incidents.map((i) => i.severity)) as 1 | 2 | 3 | 4;
     warnings.push(
       'incident severity is metadata only in the engine: the speed effect is derived from ' +
-        'the capacity loss that lanesBlocked causes, routed through BPR. The client mock ' +
-        'scaled speed directly by severity, so engine and mock will disagree on the same lever.'
+        'the capacity loss that lanesBlocked causes, routed through BPR. The earlier client ' +
+        'mock scaled speed directly by severity, so the same lever now reports a different ' +
+        'number than it used to.',
     );
     request.incident = {
       freeway: targets[0].freeway,
@@ -282,13 +274,13 @@ export function fromUiRequest(ui: UiScenarioRunRequest): ScenarioAdapterResult {
     if (!sameCarriageway(targets)) {
       throw new Error(
         'capacity_change levers span more than one freeway+direction; the engine models one ' +
-          'capacity target per run. Split into separate scenario runs.'
+          'capacity target per run. Split into separate scenario runs.',
       );
     }
     if (capacities.length > 1) {
       warnings.push(
         `${capacities.length} capacity levers were folded to the LAST one's absolute value ` +
-          `over the combined postmile window; the engine takes one capacity override per run.`
+          `over the combined postmile window; the engine takes one capacity override per run.`,
       );
     }
     const [pmFrom, pmTo] = hull(targets.map(targetWindow));
@@ -303,30 +295,3 @@ export function fromUiRequest(ui: UiScenarioRunRequest): ScenarioAdapterResult {
 
   return { request, warnings };
 }
-
-/**
- * NOT IMPLEMENTED, deliberately — and this comment is the reason why.
- *
- * The UI's `ScenarioRunResponse.matrix` wants all 96 buckets in one payload with
- * `flow`/`speed`/`vc`/`incident` as `number[]`. The engine returns four 24-bucket
- * windows of comma-separated integer strings.
- *
- * Converting server-side would mean serialising ~191,424 numbers per metric as
- * JSON arrays. That is the exact shape M1 measured at **9,540,471 B (9.10 MiB)**
- * for one day — 9x over AppKit's 1 MiB single-event cap — which is why the packed
- * string encoding exists at all. Doing it in the app process would also mean
- * holding the whole matrix in Node memory to reassemble it.
- *
- * The client already has the decoder (`client/src/lib/frames.ts` splits packed
- * strings into typed arrays once, on load, for the M1 baseline matrix) and the
- * scenario matrix uses M1's identical layout and encoding. So the right move is
- * for the UI to decode the four windows the same way it already decodes M1's,
- * and to relax `ScenarioRunResponse.matrix` to the packed form — see
- * `run.ts:decodePacked` for the one-line-per-metric version.
- */
-export const UI_MATRIX_ADAPTER_NOT_PROVIDED = {
-  reason:
-    'per-window packed strings are the transport; converting to number[] server-side ' +
-    "reproduces the 9.10 MiB payload that AppKit's 1 MiB event cap rejects",
-  clientDecoder: 'client/src/lib/frames.ts (already used for the M1 baseline matrix)',
-} as const;

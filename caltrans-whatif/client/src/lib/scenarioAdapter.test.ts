@@ -124,7 +124,7 @@ describe('every bound value is a sql.* marker', () => {
   it('pins DOUBLE params as DOUBLE even when the value is integral', () => {
     // `capacity_scale`'s "off" sentinel is 1, which sql.number() would infer as
     // INT. The SQL declares it DOUBLE, so the type must be explicit.
-    const p = matrixParams(base, 0) as unknown as Record<string, { __sql_type: string }>;
+    const p = matrixParams(base, 0);
     expect(p.capacity_scale.__sql_type).toBe('DOUBLE');
     expect(p.capacity_abs_vph.__sql_type).toBe('DOUBLE');
     expect(p.close_pm_from.__sql_type).toBe('DOUBLE');

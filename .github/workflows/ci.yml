@@ -8,10 +8,29 @@ on:
 permissions:
   contents: read
 
+# Every job targets the self-hosted `caltrans` runner, because the Databricks
+# workspace and Lakebase are not reachable from GitHub-hosted runners.
+#
+# `runs-on:` matches LABELS, never the runner's name. The runner is *named*
+# caltrans but its labels are exactly [self-hosted, macOS, ARM64], so
+# `runs-on: caltrans` would queue forever with no error — the job would just sit
+# pending. Do not add a `caltrans` entry to these lists until the label exists.
+#
+# If a second macOS ARM64 runner is ever registered, add a custom `caltrans`
+# label to this one (Settings > Actions > Runners > caltrans > Labels) and switch
+# every list in this file to [self-hosted, caltrans] to pin jobs back to it.
+#
+# NOTE: this is a macOS runner, so no `apt-get`, no GNU coreutils, and
+# /bin/bash is 3.2 (no `mapfile`). Keep steps POSIX/BSD-safe.
+#
+# SECURITY: this workflow triggers on `pull_request`, so a fork PR now executes
+# on the owner's machine rather than a disposable VM. The jobs below are
+# deliberately secret-free, but consider requiring approval for fork PRs
+# (Settings > Actions > "Require approval for all external contributors").
 jobs:
   app:
     name: App lint, typecheck, unit tests
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64]
     defaults:
       run:
         working-directory: caltrans-whatif
@@ -19,6 +38,9 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      # Works on self-hosted macOS ARM64: setup-node publishes darwin-arm64
+      # builds, and `cache: npm` caches ~/.npm (the runner user's home, outside
+      # the workspace, so `git clean` cannot corrupt it and it stays writable).
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
@@ -29,6 +51,12 @@ jobs:
       # `postinstall` runs `typegen`, which needs a live warehouse. It is written to
       # be non-fatal (`|| echo ...`) and falls back to the committed
       # shared/appkit-types/analytics.d.ts, so `npm ci` succeeds without secrets.
+      #
+      # Persistent-runner note: `npm ci` deletes node_modules before installing,
+      # and actions/checkout@v4 defaults to `clean: true` (`git clean -ffdx` +
+      # `git reset --hard`), which also wipes untracked and ignored leftovers such
+      # as node_modules/, dist/ and .databricks/ from a previous run. Do not set
+      # `clean: false` on this runner without re-reading those assumptions.
       - name: Install dependencies
         run: npm ci
 
@@ -48,11 +76,14 @@ jobs:
 
   scenario-sql:
     name: Scenario SQL drift check
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64]
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      # actions/python-versions publishes python-3.12.x-darwin-arm64, so this
+      # resolves on Apple Silicon. It also means the job does not depend on the
+      # bare-macOS /usr/bin/python3 (an Xcode Command Line Tools stub).
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -64,13 +95,20 @@ jobs:
 
   bundle-validate:
     name: Databricks bundle validate
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64]
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
       # No floating v1 tag exists upstream, so pin a full version. Pinning the
       # action at vX.Y.Z also pins the CLI it installs (via the repo VERSION file).
+      #
+      # Safe on self-hosted macOS ARM64: the action's setup_release.sh maps
+      # RUNNER_OS=macOS -> darwin and RUNNER_ARCH=ARM64 -> arm64, and
+      # databricks_cli_1.7.0_darwin_arm64.zip is published upstream. It needs only
+      # curl and unzip (both stock on macOS), uses no sudo, and installs under
+      # $RUNNER_TEMP while prepending to $GITHUB_PATH — so it leaves no state
+      # behind between runs on a persistent box.
       - name: Set up Databricks CLI
         uses: databricks/setup-cli@v1.7.0
 

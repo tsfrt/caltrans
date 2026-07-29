@@ -1,7 +1,7 @@
 -- AI Congestion Advisor — chat persistence for the California traffic what-if app.
 -- Project : projects/caltrans-app   Branch: production   DB: databricks_postgres (PG 17.10)
 --
--- Applied ON TOP of lakebase/schema.sql, which owns the `app` schema and the
+-- Applied ON TOP of lakebase/001_schema.sql, which owns the `app` schema and the
 -- config/scenarios/scenario_runs/audit tables. Idempotent (IF NOT EXISTS / ON CONFLICT),
 -- so it is safe to re-run and usable as a migration baseline.
 --
@@ -196,10 +196,10 @@ CREATE INDEX IF NOT EXISTS idx_advisor_recs_unconverted
     WHERE scenario_id IS NULL;
 
 -- ---------------------------------------------------------------------------
--- updated_at maintenance (reuses app.touch_updated_at from schema.sql)
+-- updated_at maintenance (reuses app.touch_updated_at from 001_schema.sql)
 --
 -- Defined here too so this file can be applied standalone against a database that has the
--- `app` schema but an older schema.sql. CREATE OR REPLACE makes that safe.
+-- `app` schema but an older 001_schema.sql. CREATE OR REPLACE makes that safe.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION app.touch_updated_at() RETURNS TRIGGER AS $$
 BEGIN

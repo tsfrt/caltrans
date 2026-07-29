@@ -1,0 +1,72 @@
+name: Deploy Main
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: false
+
+env:
+  DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+  DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+  LAKEBASE_PROJECT: caltrans-app
+  LAKEBASE_BRANCH: production
+  LAKEBASE_ENDPOINT: primary
+  PGUSER: thomas.seufert@databricks.com
+  LAKEBASE_SP_ROLE: 4a27f46d-04b9-4580-9767-44b505a4cf50
+
+jobs:
+  deploy:
+    name: Deploy app and migrate Lakebase
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: caltrans-whatif/package-lock.json
+
+      - name: Set up Databricks CLI
+        uses: databricks/setup-cli@v1.7.0
+
+      - name: Install PostgreSQL client 17
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y postgresql-client-17
+
+      - name: Install app dependencies
+        working-directory: caltrans-whatif
+        run: npm ci
+
+      - name: Validate app bundle
+        working-directory: caltrans-whatif
+        run: databricks bundle validate
+
+      - name: Apply Lakebase schema
+        run: scripts/lakebase/apply.sh schema
+
+      - name: Deploy Databricks app bundle
+        working-directory: caltrans-whatif
+        run: databricks bundle deploy
+
+      - name: Apply Lakebase advisor grants
+        run: scripts/lakebase/apply.sh grants
+
+      # Asserts the same privilege GET /api/advisor/health reports as
+      # "canWriteSessions", but queries Postgres directly. The app's public URL is
+      # OAuth-gated by the Apps platform and returns 401 to both unauthenticated
+      # requests and a PAT bearer token, so CI cannot read that route.
+      - name: Verify advisor Lakebase writes
+        run: scripts/lakebase/apply.sh verify

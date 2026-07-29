@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  app:
+    name: App lint, typecheck, unit tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: caltrans-whatif
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: caltrans-whatif/package-lock.json
+
+      # `postinstall` runs `typegen`, which needs a live warehouse. It is written to
+      # be non-fatal (`|| echo ...`) and falls back to the committed
+      # shared/appkit-types/analytics.d.ts, so `npm ci` succeeds without secrets.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Lint AppKit structure
+        run: npm run lint:ast-grep
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # `npm test` also runs test:smoke, which needs a browser download and a live
+      # warehouse. Call vitest directly so this job stays secret-free.
+      - name: Unit tests
+        run: npx vitest run
+
+  scenario-sql:
+    name: Scenario SQL drift check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # tools/ is stdlib-only, so this gate needs no installs.
+      - name: Check rendered scenario SQL
+        run: python -m tools.scenario_sql.render --check
+
+  bundle-validate:
+    name: Databricks bundle validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # No floating v1 tag exists upstream, so pin a full version. Pinning the
+      # action at vX.Y.Z also pins the CLI it installs (via the repo VERSION file).
+      - name: Set up Databricks CLI
+        uses: databricks/setup-cli@v1.7.0
+
+      # `bundle validate` parses and type-checks the bundle locally, but the final
+      # step resolves workspace auth, which is intentionally unavailable to
+      # fork-safe CI. Treat an auth-resolution failure as success: every syntactic
+      # and schema error is still caught before that point.
+      - name: Validate synthetic traffic bundle
+        run: .github/scripts/bundle-validate.sh .
+
+      - name: Validate what-if app bundle
+        run: .github/scripts/bundle-validate.sh caltrans-whatif

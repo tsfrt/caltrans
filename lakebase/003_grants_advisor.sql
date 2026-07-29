@@ -26,7 +26,9 @@
 --     "host=ep-divine-mode-d23no6aj.database.us-east-1.cloud.databricks.com \
 --      port=5432 dbname=databricks_postgres \
 --      user=thomas.seufert@databricks.com sslmode=require" \
---     -v ON_ERROR_STOP=1 -f lakebase/grants_advisor.sql
+--     -v ON_ERROR_STOP=1 \
+--     -v sp_role=4a27f46d-04b9-4580-9767-44b505a4cf50 \
+--     -f lakebase/003_grants_advisor.sql
 --
 -- Use the DIRECT host. The `-pooler` host rejects Lakebase OAuth tokens with
 -- `SASL authentication failed`.
@@ -36,20 +38,29 @@
 -- the `postgres` resource attached — Databricks provisions the role on that first deploy.
 -- Running this file before then fails with `role "<client-id>" does not exist`. Order:
 --
---   1. databricks apps deploy   (creates/attaches the role)
---   2. psql -f lakebase/schema_advisor.sql
---   3. psql -f lakebase/grants_advisor.sql   <- this file
+--   1. databricks bundle deploy (creates/attaches the role)
+--   2. psql -f lakebase/002_schema_advisor.sql
+--   3. psql -f lakebase/003_grants_advisor.sql   <- this file
 --   4. verify via GET /api/advisor/health  ("canWriteSessions": true)
 --
 -- The DO block below is written so step 3 reports a clear, actionable message instead of an
 -- opaque failure if it is run out of order.
 
+\if :{?sp_role}
+\else
 \set sp_role '4a27f46d-04b9-4580-9767-44b505a4cf50'
+\endif
+
+SELECT set_config('app.grants_sp_role', :'sp_role', false);
 
 DO $$
 DECLARE
-    sp TEXT := '4a27f46d-04b9-4580-9767-44b505a4cf50';
+    sp TEXT := current_setting('app.grants_sp_role', false);
 BEGIN
+    IF sp IS NULL OR sp = '' THEN
+        RAISE EXCEPTION 'No app service principal role was provided.';
+    END IF;
+
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = sp) THEN
         RAISE EXCEPTION
             'Role "%" does not exist yet. Deploy the app with the `postgres` resource '

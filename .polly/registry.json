@@ -69,7 +69,7 @@
       "status": "done",
       "owner": "polly",
       "commits": ["50374ef"],
-      "artifact": "lakebase/schema.sql, lakebase/README.md",
+      "artifact": "lakebase/001_schema.sql, lakebase/README.md",
       "note": "Infrastructure provisioning + SQL DDL, not application code. Verified: connection, DDL, insert round-trip, GIN containment, updated_at trigger. Known issue: suspend timeout stuck at 24h, will not scale to zero."
     },
     {

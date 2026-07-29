@@ -325,7 +325,7 @@ def test_engine_bpr_defaults_follow_the_generator_not_the_textbook() -> None:
     assert f"beta: {C.BPR_BETA}" in ts_defaults
     # And the conflicting Lakebase seed is still on record, so the doc's claim
     # about it stays true.
-    seed = (REPO_ROOT / "lakebase" / "schema.sql").read_text()
+    seed = (REPO_ROOT / "lakebase" / "001_schema.sql").read_text()
     assert "'bpr_alpha'" in seed and "'0.15'" in seed
 
 

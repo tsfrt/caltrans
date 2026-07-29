@@ -146,7 +146,7 @@ handles connection pooling and ~1h-TTL OAuth token refresh (the Postgres passwor
 
 **Where migrations live.** **NOT in this repo.** `store.ts:6`–`19` and `server/server.ts:52`–`61`
 state migrations are applied "out of band" from `lakebase/*.sql`, and reference
-`lakebase/README.md` + `lakebase/grants_advisor.sql`. **No `lakebase/` directory exists here**
+`lakebase/README.md` + `lakebase/003_grants_advisor.sql`. **No `lakebase/` directory exists here**
 (verified by `find` / `ls`). The `app` schema is owned by a human user
 (`thomas.seufert@databricks.com`, `store.ts:9`), not the SP; `CAN_CONNECT_AND_CREATE` alone is
 insufficient and explicit GRANTs are required, which is why the app does **no** startup schema

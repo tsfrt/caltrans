@@ -113,7 +113,7 @@ test rather than repeated.
 
 ### Why the Lakebase conflict is not resolved in code
 
-`lakebase/schema.sql` seeds `bpr_alpha=0.15` / `bpr_beta=4.0`. Those rows are
+`lakebase/001_schema.sql` seeds `bpr_alpha=0.15` / `bpr_beta=4.0`. Those rows are
 pre-existing and owned by the Lakebase migration (out of scope for this branch —
 see the file-scope note in the PR). The engine therefore takes its coefficients as
 **query parameters** with defaults in `client/src/lib/scenarioParams.ts` (and

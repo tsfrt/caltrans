@@ -34,7 +34,7 @@ These are non-obvious and would otherwise be rediscovered the hard way.
 5. **All DDL and metadata discovery must go through SQL** (`information_schema`, `SHOW`), because the UC REST API is denied.
 6. **Apps enforce a non-configurable 120-second request timeout**, and SSE may be buffered by the reverse proxy. Long-running work must not sit inside one request.
 7. **Lakebase credentials expire in ~1 hour** (verified: minted 14:09Z → expires 15:09Z). Never use a PAT as the Postgres password; recycle physical connections at ~45 min (`max_lifetime=2700`) or mint per-connection.
-8. **Deploy the app *before* initializing Lakebase schemas**, or the app service principal won't own them → `permission denied (42501)`. The `app` schema was created by a human user, so the SP needs explicit grants — see `lakebase/README.md`.
+8. **Apply Lakebase schema, deploy the app, then apply grants.** The app service principal's Postgres role exists only after the bundle deploy attaches the `postgres` resource, and the human-owned `app` schema needs explicit grants — see `lakebase/README.md`.
 9. **The Lakebase `-pooler` host rejects OAuth tokens** with `SASL authentication failed`. Use the direct endpoint host and pool client-side.
 10. **Lakebase suspend timeout is stuck at 24h** — the beta API rejects every update_mask path for it. The endpoint floors at 0.5 CU and will not scale to zero. Set it in the UI or delete the project when idle.
 

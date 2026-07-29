@@ -79,6 +79,31 @@ preview_bundle_vars() {
     "$(preview_app_name "$pr")" "$(preview_branch_path "$pr")" "$(preview_database_path "$pr")"
 }
 
+# Read preview_bundle_vars into the named array variable:  read_bundle_vars MYARR 42
+#
+# This exists instead of the obvious `mapfile -t ARR < <(preview_bundle_vars "$PR")` because
+# `mapfile`/`readarray` is a bash 4 builtin and these scripts now run on the self-hosted macOS
+# runner, where /bin/bash is 3.2.57 (Apple ships the last GPLv2 release and will not update it).
+# There, `mapfile` is a "command not found" — which under `set -e` aborts deploy.sh/teardown.sh
+# immediately, before anything useful has run.
+#
+# The `while read` loop is portable to 3.2. IFS= and -r keep values verbatim, and the
+# `[[ -n "$line" ]]` after the loop is the standard guard for a final line with no trailing
+# newline (harmless here, since preview_bundle_vars always ends with one).
+#
+# No value emitted by preview_bundle_vars ever contains whitespace or a glob character — they are
+# all `--var` and `key=<derived-name>` strings built from a validated integer — but reading
+# line-wise rather than word-splitting keeps that from being a correctness dependency.
+read_bundle_vars() {
+  local __arrname="$1" pr="$2" line
+  # `eval` is how a function assigns to a caller-named array on bash 3.2 (no `local -n`, no
+  # `declare -g`). __arrname is a literal identifier at every call site, never user input.
+  eval "$__arrname=()"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    eval "$__arrname+=(\"\$line\")"
+  done < <(preview_bundle_vars "$pr")
+}
+
 # ── Guards ───────────────────────────────────────────────────────────────────────────────
 
 # Reject anything that is not a plain positive integer. Every derived name above flows into a

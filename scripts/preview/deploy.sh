@@ -33,7 +33,7 @@ APP_NAME="$(preview_app_name "$PR")"
 BRANCH_PATH="$(preview_branch_path "$PR")"
 DATABASE_PATH="$(preview_database_path "$PR")"
 ENDPOINT_PATH="$(preview_endpoint_path "$PR")"
-mapfile -t BUNDLE_VARS < <(preview_bundle_vars "$PR")
+read_bundle_vars BUNDLE_VARS "$PR"
 
 # The bundle root is the app subdirectory — it is its own bundle, not part of the repo-root one.
 cd "$REPO_ROOT/caltrans-whatif"
@@ -95,8 +95,12 @@ printf '::endgroup::\n'
 # ── Phase 3: Lakebase grants on the preview branch ──────────────────────────────────────
 # Delegated to the shared applier owned by the main-deploy workflow, so the grant SQL lives in
 # exactly one place. See the contract note in scripts/preview/apply-lakebase-grants.sh.
+#
+# Takes the PR number, not a resource path: the shared applier wants the project/branch/endpoint
+# as separate IDs and composes the path itself, so passing the PR number lets lib.sh remain the
+# single place any of those names is derived.
 printf '::group::Lakebase grants on %s\n' "$BRANCH_PATH"
-"$REPO_ROOT/scripts/preview/apply-lakebase-grants.sh" "$ENDPOINT_PATH" "$SP_CLIENT_ID"
+"$REPO_ROOT/scripts/preview/apply-lakebase-grants.sh" "$PR" "$SP_CLIENT_ID"
 printf '::endgroup::\n'
 
 # ── Phase 4: build + start ──────────────────────────────────────────────────────────────

@@ -1,6 +1,10 @@
 # ai-dev-kit local install artifacts
 .ai-dev-kit/
 .agents/
+# agent orchestration state (registry, worktrees, review notes) -- local only, never
+# part of a feature branch. Unanchored so it matches .polly/ at any depth.
+.polly/
+.worktrees/
 # python
 __pycache__/
 *.pyc

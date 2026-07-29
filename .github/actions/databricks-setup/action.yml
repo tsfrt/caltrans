@@ -22,6 +22,14 @@ runs:
     #     every command in these workflows was verified against.
     #   * `databricks postgres` is Beta and documented as subject to change without notice, so
     #     bump this deliberately and re-verify the branch commands rather than floating.
+    #
+    # Verified safe on the self-hosted macOS ARM64 runner (this action runs on no other kind):
+    # setup_release.sh maps RUNNER_OS=macOS -> `_darwin` and RUNNER_ARCH=ARM64 -> `_arm64`, and
+    # databricks/cli v1.7.0 does publish databricks_cli_1.7.0_darwin_arm64.zip. It installs into a
+    # mktemp dir under $RUNNER_TEMP and appends that to $GITHUB_PATH — no sudo, no /usr/local
+    # write, nothing needing a privileged path — and needs only `curl` and `unzip`, both stock on
+    # macOS. So no change was needed here; recorded because "does this action have darwin/arm64
+    # assets" is not answerable from the pin alone.
     - uses: databricks/setup-cli@v1.7.0
 
     - name: Configure authentication
@@ -32,7 +40,7 @@ runs:
       run: |
         set -euo pipefail
         if [[ -z "$DATABRICKS_HOST" || -z "$DATABRICKS_TOKEN" ]]; then
-          echo "::error::DATABRICKS_HOST and DATABRICKS_TOKEN must both be set. See docs/preview-environments.md."
+          echo "::error::DATABRICKS_HOST and DATABRICKS_TOKEN must both be set. See docs/PREVIEW_ENVIRONMENTS.md."
           exit 1
         fi
         # Export for every later step in the job. PAT auth needs only these two variables;

@@ -33,7 +33,7 @@ APP_NAME="$(preview_app_name "$PR")"
 BRANCH_PATH="$(preview_branch_path "$PR")"
 DATABASE_PATH="$(preview_database_path "$PR")"
 ENDPOINT_PATH="$(preview_endpoint_path "$PR")"
-mapfile -t BUNDLE_VARS < <(preview_bundle_vars "$PR")
+read_bundle_vars BUNDLE_VARS "$PR"
 
 # The bundle root is the app subdirectory — it is its own bundle, not part of the repo-root one.
 cd "$REPO_ROOT/caltrans-whatif"

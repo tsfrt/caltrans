@@ -29,12 +29,31 @@ jobs:
     # through. Skip them explicitly instead. (A `pull_request` trigger also gives forks a
     # read-only token, so the sticky comment would fail too.)
     if: github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    # Must be the self-hosted runner: the Databricks workspace and Lakebase are not reachable
+    # from GitHub-hosted runners.
+    #
+    # These are LABELS, not the runner's name. The registered runner is *named* `caltrans`, but
+    # `runs-on:` only ever matches labels, so `runs-on: caltrans` would queue forever waiting for
+    # a label nobody has. [self-hosted, macOS, ARM64] is the label set that runner actually
+    # carries, and today it is the only runner carrying it, so this targets it uniquely.
+    #
+    # If a second macOS ARM64 runner is ever registered, this list stops being unique. At that
+    # point add a custom `caltrans` LABEL to this runner (Settings -> Actions -> Runners -> the
+    # runner -> Labels) and narrow this to [self-hosted, caltrans]. Do not pre-emptively write
+    # that label here — it does not exist yet, and a job asking for it would never be picked up.
+    runs-on: [self-hosted, macOS, ARM64]
     environment: preview
     timeout-minutes: 45
 
     steps:
+      # `clean: true` is the default, but state it explicitly: this runner is PERSISTENT, so the
+      # workspace is whatever the previous run left behind. checkout's `git clean -ffdx` +
+      # `git reset --hard` is the only thing removing a stale node_modules/, a stale .databricks/
+      # local bundle state dir, and — importantly — the app.yaml edit that strip-self-url.sh makes
+      # in-tree. Without it those would accumulate across runs.
       - uses: actions/checkout@v4
+        with:
+          clean: true
 
       - uses: ./.github/actions/databricks-setup
         with:
@@ -44,6 +63,12 @@ jobs:
       # Node is needed because `apps deploy` builds the app (tsc + vite) as part of its
       # validation pipeline. The repo pins no Node version anywhere — no engines field, no
       # .nvmrc — so 22 is chosen here to match the version the app was developed against.
+      #
+      # Works as-is on self-hosted macOS ARM64: setup-node publishes darwin-arm64 Node builds, and
+      # on a self-hosted runner it installs into RUNNER_TOOL_CACHE (persisting across runs, so
+      # after the first job this is a cache hit rather than a download). `cache: npm` keys off the
+      # lockfile and writes to the actions/cache backend, not a local dir, so nothing here needs a
+      # privileged or pre-created path. Kept unchanged.
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -51,15 +76,68 @@ jobs:
           cache-dependency-path: caltrans-whatif/package-lock.json
 
       # deploy.sh phase 3 shells out to scripts/lakebase/apply.sh, which hard-requires `psql`
-      # (`require_cmd psql` -> exit 127). The runner image ships no postgresql-client, so without
-      # this the grants step dies and the preview app deploys LOOKING healthy while every advisor
-      # write fails with 42501 at runtime. Mirrors deploy-main.yml's install of the same client.
-      - name: Install PostgreSQL client 17
+      # (`require_cmd psql` -> exit 127). Without a resolvable psql the grants step dies and the
+      # preview app deploys LOOKING healthy while every advisor write fails with 42501 at runtime.
+      # That silent failure mode is the entire reason this step exists, so it ends by PROVING psql
+      # resolves rather than assuming the install worked.
+      #
+      # macOS/ARM64, not Debian: there is no apt-get here. Homebrew's `libpq` provides psql
+      # (`postgresql@17` would too, but it also drags in a server we do not want on a CI box).
+      #
+      # libpq is keg-only ("it conflicts with PostgreSQL"), so brew deliberately does NOT symlink
+      # psql into /opt/homebrew/bin — the explicit $GITHUB_PATH export below is required, not
+      # belt-and-braces. /opt/homebrew is the Apple Silicon prefix (Intel would be /usr/local).
+      #
+      # The runner is persistent, so the install is guarded: on an already-provisioned box every
+      # branch here is a no-op and the step just re-exports PATH (which must happen every run —
+      # $GITHUB_PATH does not persist between jobs).
+      #
+      # No `sudo` anywhere: a self-hosted runner may well not have passwordless sudo, and `brew`
+      # on Apple Silicon owns /opt/homebrew as the invoking user, so it must NOT be run with sudo.
+      - name: Ensure psql is available
         run: |
-          sudo apt-get update
-          sudo apt-get install -y postgresql-common
-          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
-          sudo apt-get install -y postgresql-client-17
+          set -euo pipefail
+
+          BREW_PREFIX=/opt/homebrew
+          LIBPQ_BIN="$BREW_PREFIX/opt/libpq/bin"
+
+          if command -v psql >/dev/null 2>&1; then
+            echo "psql already on PATH: $(command -v psql)"
+          else
+            # Not on PATH — but it may already be installed keg-only from a previous run, in which
+            # case this is just a PATH problem and there is nothing to install.
+            if [[ -x "$LIBPQ_BIN/psql" ]]; then
+              echo "psql already installed keg-only at $LIBPQ_BIN/psql; only PATH was missing"
+            else
+              if ! command -v brew >/dev/null 2>&1; then
+                echo "::error::Homebrew is not installed on this self-hosted runner, so psql cannot be installed automatically."
+                echo "::error::Install it once on the 'caltrans' runner: /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\" && brew install libpq"
+                echo "::error::See docs/PREVIEW_ENVIRONMENTS.md (runner prerequisites)."
+                exit 1
+              fi
+              echo "Installing libpq (provides psql) via Homebrew..."
+              brew install libpq
+            fi
+          fi
+
+          # Export for every LATER step in this job. Harmless if psql came from elsewhere on PATH;
+          # prepending would be wrong (it would shadow an intentionally-chosen psql), appending is
+          # enough because $GITHUB_PATH entries precede the inherited PATH anyway.
+          if [[ -d "$LIBPQ_BIN" ]]; then
+            echo "$LIBPQ_BIN" >>"$GITHUB_PATH"
+          fi
+
+          # Fail LOUDLY and actionably now rather than as exit 127 inside apply.sh three steps
+          # later, where the symptom is "grants never applied" and the app still looks healthy.
+          # $GITHUB_PATH only affects subsequent steps, so probe this step's own PATH explicitly.
+          if ! PATH="$LIBPQ_BIN:$PATH" command -v psql >/dev/null 2>&1; then
+            echo "::error::psql is still not resolvable after the install attempt."
+            echo "::error::Looked for it on PATH and at $LIBPQ_BIN/psql."
+            echo "::error::If Homebrew lives somewhere other than $BREW_PREFIX (e.g. an Intel Mac at /usr/local), update BREW_PREFIX in .github/workflows/preview-up.yml."
+            echo "::error::Otherwise run 'brew install libpq' on the 'caltrans' runner and re-run this job."
+            exit 1
+          fi
+          PATH="$LIBPQ_BIN:$PATH" psql --version
 
       - name: Install app dependencies
         working-directory: caltrans-whatif

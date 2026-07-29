@@ -10,7 +10,7 @@
  * app's service principal. `CAN_CONNECT_AND_CREATE` lets the SP create its own objects but
  * grants nothing on someone else's schema, so the SP needs explicit GRANTs or every write
  * here fails with `permission denied (42501)`. See lakebase/README.md and
- * lakebase/grants_advisor.sql. This module does NOT attempt to create the schema at
+ * lakebase/003_grants_advisor.sql. This module does NOT attempt to create the schema at
  * startup: doing so as the SP would either no-op (it exists) or, worse, succeed in a fresh
  * database and leave two divergent definitions of the same tables. Migrations are applied
  * out of band from lakebase/*.sql.

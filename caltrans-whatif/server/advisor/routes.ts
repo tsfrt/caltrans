@@ -193,7 +193,7 @@ export function registerAdvisorRoutes(app: Application, deps: AdvisorDeps): void
     }
     // Report whether the advisor tables are actually writable by THIS identity. This is the
     // check that catches the `permission denied (42501)` case the SP hits when it does not
-    // own the `app` schema — see lakebase/grants_advisor.sql.
+    // own the `app` schema — see lakebase/003_grants_advisor.sql.
     try {
       const { rows } = await db.query<{ can_insert: boolean }>(
         `SELECT has_table_privilege('app.advisor_sessions', 'INSERT') AS can_insert`,

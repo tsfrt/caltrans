@@ -50,14 +50,53 @@ recycle physical connections at ~45 min (`max_lifetime=2700`) or mint a fresh
 credential per new physical connection. A pool that holds connections longer
 than the token lifetime will fail mid-session.
 
-## Applying the schema
+## Applying schema and grants
 
 ```bash
-psql "host=... sslmode=require" -v ON_ERROR_STOP=1 -f lakebase/schema.sql
+# Resolves the direct endpoint host, mints a short-lived Lakebase OAuth token,
+# and applies 001_schema.sql + 002_schema_advisor.sql in one transaction.
+scripts/lakebase/apply.sh schema
+
+# Run only after `databricks bundle deploy` has created the app SP Postgres role.
+scripts/lakebase/apply.sh grants
+
+# Assert the app service principal can actually write (the "canWriteSessions"
+# check). Exits non-zero if the grants did not take effect.
+scripts/lakebase/apply.sh verify
 ```
 
-`schema.sql` is idempotent (`IF NOT EXISTS` / `ON CONFLICT DO NOTHING`), so it
-is safe to re-run and usable as a migration baseline.
+`001_schema.sql` and `002_schema_advisor.sql` are idempotent (`IF NOT EXISTS` /
+`ON CONFLICT DO NOTHING`), so they are safe to re-run and usable as a migration
+baseline. The schema step uses `psql --single-transaction` so a partial apply
+rolls back.
+
+The deployment order is deliberate:
+
+1. `scripts/lakebase/apply.sh schema`
+2. `databricks bundle deploy` from `caltrans-whatif/`
+3. `scripts/lakebase/apply.sh grants`
+4. `scripts/lakebase/apply.sh verify`
+
+Step 4 asserts the same privilege that `GET /api/advisor/health` reports as
+`"canWriteSessions"`, but queries Postgres directly. The app's public URL is
+OAuth-gated by the Apps platform and returns `401` to both unauthenticated
+requests and a PAT bearer token, so automation cannot read that route.
+
+The deploy sits between schema and grants because Databricks creates the app
+service principal's Postgres role only after the app is deployed with the
+`postgres` resource attached.
+
+Preview automation can grant a preview app's own service principal without
+editing SQL:
+
+```bash
+scripts/lakebase/apply.sh grants \
+  --branch pr-123 \
+  --sp-role "<preview-app-service-principal-client-id>"
+```
+
+If `--sp-role` is omitted, the script defaults to the production app role
+`4a27f46d-04b9-4580-9767-44b505a4cf50`.
 
 ## Schema
 
@@ -117,10 +156,10 @@ databricks postgres delete-project projects/caltrans-app
 
 ## App deployment ordering
 
-⚠️ **Deploy the Databricks App before initializing schemas as a human user.**
-The app service principal needs `CAN_CONNECT_AND_CREATE` and should own the
-`app` schema. This schema was created by `thomas.seufert@databricks.com`, so
-after the app is deployed grant its SP explicitly:
+⚠️ **Create schemas first, deploy the Databricks App, then grant the app service
+principal explicitly.** The app service principal needs `CAN_CONNECT_AND_CREATE`,
+but this schema is owned by `thomas.seufert@databricks.com`, so the deployed app
+still needs GRANTs:
 
 ```sql
 GRANT USAGE, CREATE ON SCHEMA app TO "<app-service-principal-id>";
@@ -128,6 +167,9 @@ GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA app TO "<app-service-principal-id>"
 ALTER DEFAULT PRIVILEGES IN SCHEMA app
   GRANT ALL ON TABLES TO "<app-service-principal-id>";
 ```
+
+`scripts/lakebase/apply.sh grants` applies the full idempotent version,
+including sequence privileges and default privileges for future tables.
 
 Skipping this is the documented #1 source of Lakebase `permission denied (42501)`
 errors in deployed apps.

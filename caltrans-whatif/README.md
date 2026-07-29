@@ -297,7 +297,7 @@ from the data rather than estimated.
 
 ### Lakebase schema
 
-`lakebase/schema_advisor.sql` (idempotent; applied out of band, not from app startup).
+`lakebase/002_schema_advisor.sql` (idempotent; applied out of band, not from app startup).
 
 | Table | Purpose |
 |---|---|
@@ -322,18 +322,18 @@ Session create and message send also append to the existing `app.audit`.
 
 `CAN_CONNECT_AND_CREATE` lets the app's service principal connect and create **its own**
 objects. It grants nothing on a schema someone else owns — and `app` was created by
-`thomas.seufert@databricks.com`, not the SP. Without `lakebase/grants_advisor.sql`, every
+`thomas.seufert@databricks.com`, not the SP. Without `lakebase/003_grants_advisor.sql`, every
 advisor write fails with `permission denied for schema app` (SQLSTATE 42501) — **at runtime, in
 the deployed app only.** Local development runs as the schema owner and works perfectly, so the
 feature looks complete right up until it is deployed.
 
-Ordering matters, because the SP's Postgres role does not exist until the first deploy that
-attaches the `postgres` resource:
+Ordering matters, because the SP's Postgres role does not exist until the first bundle deploy
+that attaches the `postgres` resource:
 
 ```
-1. databricks apps deploy                     # provisions the SP's Postgres role
-2. psql -f lakebase/schema_advisor.sql
-3. psql -f lakebase/grants_advisor.sql
+1. scripts/lakebase/apply.sh schema           # 001 + 002, one transaction
+2. databricks bundle deploy                   # provisions the SP's Postgres role
+3. scripts/lakebase/apply.sh grants           # defaults to production SP role
 4. GET /api/advisor/health  ->  "canWriteSessions": true
 ```
 

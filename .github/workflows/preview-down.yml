@@ -46,6 +46,64 @@ jobs:
         with:
           clean: true
 
+      # THIS STEP IS THE LEAK GUARD. jq is required and was installed by nothing: Ubuntu images
+      # ship it, macOS does not. teardown.sh does `require_cmd databricks jq` and exits 127
+      # without it, and ./.github/actions/databricks-setup pipes `databricks current-user me`
+      # through jq in its "Verify identity" step -- so this must run BEFORE that action.
+      #
+      # Consequence of getting this wrong: teardown dies before deleting anything and the paid
+      # Lakebase branch leaks SILENTLY. An idle branch floors at ~0.5 CU with a 24h suspend
+      # timeout that cannot be lowered, and it holds one of the project's 10 unarchived slots.
+      #
+      # UNLIKE libpq, jq is NOT keg-only: brew links it into <prefix>/bin, already on PATH. No
+      # $GITHUB_PATH export -- a <prefix>/opt/jq/bin does not exist.
+      #
+      # Idempotent and sudo-free; the `command -v jq` guard no-ops on a provisioned box.
+      - name: Ensure jq is available
+        run: |
+          set -euo pipefail
+
+          if command -v jq >/dev/null 2>&1; then
+            echo "jq already on PATH: $(command -v jq) ($(jq --version))"
+            exit 0
+          fi
+
+          if ! command -v brew >/dev/null 2>&1; then
+            for candidate in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+              if [ -x "$candidate" ]; then
+                eval "$("$candidate" shellenv)"
+                break
+              fi
+            done
+          fi
+
+          if ! command -v brew >/dev/null 2>&1; then
+            echo "::error title=Runner setup incomplete::Homebrew is not installed on the self-hosted runner 'caltrans', so jq cannot be installed and this preview CANNOT be torn down."
+            echo "The Lakebase branch for this PR is still billing. Install Homebrew on that machine, then re-run this workflow:" >&2
+            echo '  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"' >&2
+            echo "  brew install jq" >&2
+            exit 1
+          fi
+
+          echo "Installing jq via Homebrew..."
+          brew install jq
+
+      # Prove it in a fresh step rather than trusting the installing shell's environment. A red
+      # run here is the loud version of the failure; the quiet version is a branch that bills
+      # forever.
+      - name: Assert jq is on PATH
+        run: |
+          set -euo pipefail
+          if ! command -v jq >/dev/null 2>&1; then
+            echo "::error title=jq missing::jq is not on PATH, so teardown.sh cannot run and this PR's Lakebase branch will keep billing."
+            echo "On the self-hosted runner 'caltrans', run: brew install jq" >&2
+            echo "Then re-run this workflow, or clean up by hand with scripts/preview/teardown.sh." >&2
+            echo "PATH was: $PATH" >&2
+            exit 1
+          fi
+          echo "jq resolved: $(command -v jq)"
+          jq --version
+
       - uses: ./.github/actions/databricks-setup
         with:
           databricks-host: ${{ secrets.DATABRICKS_HOST }}

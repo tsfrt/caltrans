@@ -55,6 +55,63 @@ jobs:
         with:
           clean: true
 
+      # jq is required and was installed by NOTHING. Ubuntu images ship it; macOS does not.
+      # create-branch.sh / deploy.sh both `require_cmd databricks jq` (exit 127), and
+      # ./.github/actions/databricks-setup pipes `databricks current-user me` through jq in its
+      # own "Verify identity" step -- which is why this must come BEFORE that action, not after.
+      #
+      # UNLIKE libpq, jq is NOT keg-only: brew symlinks it into <prefix>/bin, which is already on
+      # PATH. So there is deliberately no $GITHUB_PATH export here -- copying libpq's export logic
+      # would point at a <prefix>/opt/jq/bin that does not exist.
+      #
+      # Idempotent and sudo-free: the runner is persistent, so on an already-provisioned box the
+      # `command -v jq` guard makes this a no-op rather than a reinstall every run.
+      - name: Ensure jq is available
+        run: |
+          set -euo pipefail
+
+          if command -v jq >/dev/null 2>&1; then
+            echo "jq already on PATH: $(command -v jq) ($(jq --version))"
+            exit 0
+          fi
+
+          if ! command -v brew >/dev/null 2>&1; then
+            # brew may be installed but absent from a non-login shell's PATH.
+            for candidate in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+              if [ -x "$candidate" ]; then
+                eval "$("$candidate" shellenv)"
+                break
+              fi
+            done
+          fi
+
+          if ! command -v brew >/dev/null 2>&1; then
+            echo "::error title=Runner setup incomplete::Homebrew is not installed on the self-hosted runner 'caltrans', so jq cannot be installed."
+            echo "Install it once on that machine as the runner user, then re-run:" >&2
+            echo '  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"' >&2
+            echo "  brew install jq" >&2
+            exit 1
+          fi
+
+          echo "Installing jq via Homebrew..."
+          brew install jq
+
+      # Separate step so the assertion is real: brew's symlink lands in a directory already on
+      # PATH, but proving it in a FRESH step rules out anything that only worked because of the
+      # installing shell's own environment. Failing here beats `require_cmd ... jq` exiting a bare
+      # 127 mid-deploy, or -- worse, on teardown -- leaking a billing Lakebase branch.
+      - name: Assert jq is on PATH
+        run: |
+          set -euo pipefail
+          if ! command -v jq >/dev/null 2>&1; then
+            echo "::error title=jq missing::jq is not on PATH, so the preview scripts and the databricks-setup identity check cannot run."
+            echo "On the self-hosted runner 'caltrans', run: brew install jq" >&2
+            echo "PATH was: $PATH" >&2
+            exit 1
+          fi
+          echo "jq resolved: $(command -v jq)"
+          jq --version
+
       - uses: ./.github/actions/databricks-setup
         with:
           databricks-host: ${{ secrets.DATABRICKS_HOST }}
@@ -82,6 +139,20 @@ jobs:
         with:
           node-version: '22'
 
+      # The preview path shells out to python3: scripts/preview/strip-self-url.sh does its
+      # in-place app.yaml edit in Python (deploy.sh calls it before either deploy phase), and
+      # scripts/lakebase/apply.sh -- reached via deploy.sh phase 3 -- does `require_cmd python3`
+      # and uses it to parse the CLI's JSON.
+      #
+      # Bare macOS /usr/bin/python3 is an Xcode Command Line Tools stub that can prompt to
+      # install or be missing entirely, so pin a real interpreter exactly as deploy-main.yml and
+      # ci.yml already do. actions/python-versions publishes python-3.12.x-darwin-arm64, so this
+      # resolves on Apple Silicon; 3.12 matches the other two workflows deliberately.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       # deploy.sh phase 3 shells out to scripts/lakebase/apply.sh, which hard-requires `psql`
       # (`require_cmd psql` -> exit 127). Without a resolvable psql the grants step dies and the
       # preview app deploys LOOKING healthy while every advisor write fails with 42501 at runtime.
@@ -91,40 +162,67 @@ jobs:
       # macOS/ARM64, not Debian: there is no apt-get here. Homebrew's `libpq` provides psql
       # (`postgresql@17` would too, but it also drags in a server we do not want on a CI box).
       #
-      # libpq is keg-only ("it conflicts with PostgreSQL"), so brew deliberately does NOT symlink
-      # psql into /opt/homebrew/bin — the explicit $GITHUB_PATH export below is required, not
-      # belt-and-braces. /opt/homebrew is the Apple Silicon prefix (Intel would be /usr/local).
+      # libpq IS keg-only ("it conflicts with PostgreSQL"), so brew deliberately does NOT symlink
+      # psql into <prefix>/bin — the explicit $GITHUB_PATH export below is required, not
+      # belt-and-braces. (Contrast the jq step above: jq is not keg-only and needs no export.)
+      #
+      # The prefix is READ FROM `brew --prefix`, never hardcoded: it is /opt/homebrew on Apple
+      # Silicon but /usr/local on Intel, and can be custom. This previously pinned /opt/homebrew,
+      # which silently breaks on any other layout — deploy-main.yml already derived it, and these
+      # two now agree.
       #
       # The runner is persistent, so the install is guarded: on an already-provisioned box every
       # branch here is a no-op and the step just re-exports PATH (which must happen every run —
       # $GITHUB_PATH does not persist between jobs).
       #
       # No `sudo` anywhere: a self-hosted runner may well not have passwordless sudo, and `brew`
-      # on Apple Silicon owns /opt/homebrew as the invoking user, so it must NOT be run with sudo.
+      # owns its prefix as the invoking user, so it must NOT be run with sudo.
       - name: Ensure psql is available
         run: |
           set -euo pipefail
 
-          BREW_PREFIX=/opt/homebrew
+          # Resolve brew first — the libpq path is derived from its prefix, so this has to come
+          # before any use of LIBPQ_BIN. brew may be installed but missing from a non-login
+          # shell's PATH, so try the standard prefixes before concluding it is absent.
+          if ! command -v brew >/dev/null 2>&1; then
+            for candidate in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+              if [ -x "$candidate" ]; then
+                eval "$("$candidate" shellenv)"
+                break
+              fi
+            done
+          fi
+
+          # With no brew there is no prefix to derive. If psql happens to be on PATH already
+          # (a system Postgres, or an earlier $GITHUB_PATH entry) that is still fine.
+          if ! command -v brew >/dev/null 2>&1; then
+            if command -v psql >/dev/null 2>&1; then
+              echo "psql already on PATH: $(command -v psql) ($(psql --version)); brew not needed"
+              exit 0
+            fi
+            echo "::error::Homebrew is not installed on this self-hosted runner, so psql cannot be installed automatically."
+            echo "::error::Install it once on the 'caltrans' runner: /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\" && brew install libpq"
+            echo "::error::See docs/PREVIEW_ENVIRONMENTS.md (runner prerequisites)."
+            exit 1
+          fi
+
+          BREW_PREFIX="$(brew --prefix)"
           LIBPQ_BIN="$BREW_PREFIX/opt/libpq/bin"
 
           if command -v psql >/dev/null 2>&1; then
             echo "psql already on PATH: $(command -v psql)"
+          elif [[ -x "$LIBPQ_BIN/psql" ]]; then
+            # Installed keg-only by a previous run; this is only a PATH problem.
+            echo "psql already installed keg-only at $LIBPQ_BIN/psql; only PATH was missing"
           else
-            # Not on PATH — but it may already be installed keg-only from a previous run, in which
-            # case this is just a PATH problem and there is nothing to install.
-            if [[ -x "$LIBPQ_BIN/psql" ]]; then
-              echo "psql already installed keg-only at $LIBPQ_BIN/psql; only PATH was missing"
-            else
-              if ! command -v brew >/dev/null 2>&1; then
-                echo "::error::Homebrew is not installed on this self-hosted runner, so psql cannot be installed automatically."
-                echo "::error::Install it once on the 'caltrans' runner: /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\" && brew install libpq"
-                echo "::error::See docs/PREVIEW_ENVIRONMENTS.md (runner prerequisites)."
-                exit 1
-              fi
-              echo "Installing libpq (provides psql) via Homebrew..."
-              brew install libpq
-            fi
+            echo "Installing libpq (provides psql) via Homebrew..."
+            brew install libpq
+          fi
+
+          # Ask brew directly if the derived path is not there — a formula can report a prefix
+          # that does not match <prefix>/opt/<name> under unusual installs.
+          if [[ ! -x "$LIBPQ_BIN/psql" ]]; then
+            LIBPQ_BIN="$(brew --prefix libpq 2>/dev/null || true)/bin"
           fi
 
           # Export for every LATER step in this job. Harmless if psql came from elsewhere on PATH;
@@ -139,8 +237,8 @@ jobs:
           # $GITHUB_PATH only affects subsequent steps, so probe this step's own PATH explicitly.
           if ! PATH="$LIBPQ_BIN:$PATH" command -v psql >/dev/null 2>&1; then
             echo "::error::psql is still not resolvable after the install attempt."
-            echo "::error::Looked for it on PATH and at $LIBPQ_BIN/psql."
-            echo "::error::If Homebrew lives somewhere other than $BREW_PREFIX (e.g. an Intel Mac at /usr/local), update BREW_PREFIX in .github/workflows/preview-up.yml."
+            echo "::error::Looked for it on PATH and at $LIBPQ_BIN/psql (brew prefix: $BREW_PREFIX)."
+            echo "::error::Inspect the runner with: brew --prefix libpq && ls \"\$(brew --prefix libpq)/bin\""
             echo "::error::Otherwise run 'brew install libpq' on the 'caltrans' runner and re-run this job."
             exit 1
           fi

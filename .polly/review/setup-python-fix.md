@@ -77,3 +77,44 @@ deeper than the bare-`python` issue.
    caveat path and it provides `python3` **and** `python`, so the fix is belt-and-braces rather
    than dependent on (1) alone. Structurally the same keg-only-style export the repo already does
    for `libpq`, and the prefix is READ from `brew --prefix`, never hardcoded (Intel/custom prefixes).
+
+---
+
+## Item 6 — REAL observed CI results on the self-hosted `caltrans` runner
+
+PR #15, branch `polly/fix-setup-python`, commit 4317198. CI run **30484708915**.
+
+### `Scenario SQL drift check` — the job that was RED is now GREEN
+
+```
+JOB: Scenario SQL drift check => success
+  1. Set up job              :: success
+  2. Check out repository     :: success
+  3. Ensure Python            :: success   <- WAS: "Set up Python" FAILED HERE
+  4. Check rendered scenario SQL :: success
+  8. Post Check out repository :: success
+  9. Complete job             :: success
+```
+
+Real runtime output from the runner (not the echoed script):
+
+```
+Installing python@3.12 via Homebrew...
+==> Installing python@3.12 dependency: ca-certificates
+python3 will resolve to: /opt/homebrew/opt/python@3.12/libexec/bin/python3
+python3 resolved: /opt/homebrew/opt/python@3.12/libexec/bin/python3
+Python 3.12.13
+interpreter OK: 3.12.13
+scenario SQL is in sync with the generator
+```
+
+**Two things this empirically proves, beyond "it passed":**
+
+1. `python3` resolved to **`/opt/homebrew/opt/python@3.12/libexec/bin/python3`** — the
+   `libexec/bin` path, NOT `<prefix>/bin`. So the altinstall analysis in Item 5 was correct and
+   **that PATH export was load-bearing.** Without it `python3` would have fallen through to the
+   `/usr/bin/python3` CLT stub.
+2. `python@3.12` was **NOT already present** ("Installing python@3.12 via Homebrew...", and it had
+   to pull `ca-certificates`). So the fix provisioned Python from scratch on a real box with no
+   human action and no sudo — which is precisely the Option C claim, now demonstrated rather than
+   argued. Homebrew resolved 3.12.13 (drift from setup-python's 3.12.10 — harmless, per Item 3).

@@ -19,6 +19,7 @@ import {
   listMessages,
   listSessions,
   serialiseSession,
+  setMessageReviewed,
   type Db,
 } from './store.js';
 import { parseModelResponse, stripPartialFence } from './recommendations.js';
@@ -169,6 +170,75 @@ describe('appendMessage', () => {
     // JSON.stringify(null) === "null", which would be a valid jsonb null — a different thing
     // from SQL NULL, and it would make `recommendations IS NULL` filters wrong.
     expect(calls[0].values[9]).toBeNull();
+  });
+});
+
+describe('setMessageReviewed', () => {
+  it('sets reviewed_at from the database clock, not the client', async () => {
+    const { db, calls } = fakeDb([{ id: 'm1', reviewed_at: '2026-07-29T18:00:00Z' }]);
+    await setMessageReviewed(db, {
+      sessionId: 'sess-1',
+      messageId: 'm1',
+      reviewedBy: 'someone@example.com',
+      reviewed: true,
+    });
+    // now() server-side: a client-supplied timestamp would let the flag claim a review
+    // happened at a time the database never saw.
+    expect(calls[0].text).toContain('now()');
+    expect(calls[0].values).toEqual([true, 'someone@example.com', 'm1', 'sess-1']);
+  });
+
+  it('scopes by session and to assistant turns in the predicate', async () => {
+    const { db, calls } = fakeDb([]);
+    const got = await setMessageReviewed(db, {
+      sessionId: 'sess-1',
+      messageId: 'm1',
+      reviewedBy: 'someone@example.com',
+      reviewed: true,
+    });
+    // A message id from another session must be indistinguishable from a missing one, and
+    // only assistant turns are assessments worth reviewing.
+    expect(calls[0].text).toContain('WHERE id = $3 AND session_id = $4');
+    expect(calls[0].text).toContain("role = 'assistant'");
+    expect(got).toBeNull();
+  });
+
+  it('clears BOTH columns when unmarking, leaving no half-state', async () => {
+    const { db, calls } = fakeDb([{ id: 'm1', reviewed_at: null, reviewed_by: null }]);
+    await setMessageReviewed(db, {
+      sessionId: 'sess-1',
+      messageId: 'm1',
+      reviewedBy: 'someone@example.com',
+      reviewed: false,
+    });
+    // A stale reviewed_by beside a null reviewed_at would read as "reviewed by X, at no time".
+    expect(calls[0].text).toContain('reviewed_at = CASE WHEN $1::boolean THEN now() ELSE NULL END');
+    expect(calls[0].text).toContain('reviewed_by = CASE WHEN $1::boolean THEN $2::text ELSE NULL END');
+    expect(calls[0].values[0]).toBe(false);
+  });
+
+  it('returns the review columns so the client never guesses them', async () => {
+    const { db, calls } = fakeDb([{ id: 'm1' }]);
+    await setMessageReviewed(db, {
+      sessionId: 'sess-1',
+      messageId: 'm1',
+      reviewedBy: 'someone@example.com',
+      reviewed: true,
+    });
+    expect(calls[0].text).toContain('RETURNING');
+    expect(calls[0].text).toContain('reviewed_at');
+    expect(calls[0].text).toContain('reviewed_by');
+  });
+});
+
+describe('message reads include review state', () => {
+  it('selects the review columns in listMessages', async () => {
+    const { db, calls } = fakeDb([]);
+    await listMessages(db, 'sess-1');
+    // Dropping these from the shared column list would silently blank the flag in the UI
+    // while every type check still passed.
+    expect(calls[0].text).toContain('reviewed_at');
+    expect(calls[0].text).toContain('reviewed_by');
   });
 });
 

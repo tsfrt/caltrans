@@ -49,6 +49,7 @@ export function AdvisorPanel({ advisor, current, onClose }: AdvisorPanelProps) {
     send,
     open,
     remove,
+    setReviewed,
     reset,
   } = advisor;
 
@@ -225,7 +226,7 @@ export function AdvisorPanel({ advisor, current, onClose }: AdvisorPanelProps) {
         ) : null}
 
         {messages.map((m) => (
-          <MessageBubble key={m.id} message={m} />
+          <MessageBubble key={m.id} message={m} onSetReviewed={setReviewed} />
         ))}
 
         {sending && transport === 'invoke' ? (
@@ -299,7 +300,13 @@ function SnapshotSummary({ session }: { session: AdvisorSession }) {
   );
 }
 
-function MessageBubble({ message }: { message: AdvisorMessage }) {
+function MessageBubble({
+  message,
+  onSetReviewed,
+}: {
+  message: AdvisorMessage;
+  onSetReviewed: (messageId: string, reviewed: boolean) => Promise<void>;
+}) {
   const isUser = message.role === 'user';
   const prose = useMemo(() => stripRecommendationFence(message.content), [message.content]);
   const recs = message.recommendations ?? [];
@@ -325,7 +332,68 @@ function MessageBubble({ message }: { message: AdvisorMessage }) {
         </div>
       ) : null}
 
-      {!isUser && !message.pending ? <MessageMeta message={message} /> : null}
+      {!isUser && !message.pending ? (
+        <div className="flex items-center gap-2">
+          <MessageMeta message={message} />
+          <ReviewToggle message={message} onSetReviewed={onSetReviewed} />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * The human-reviewed flag for one assessment.
+ *
+ * Binary and per-turn, deliberately separate from the recommendation cards: it records that a
+ * person read THIS assessment, which is meaningful even when the advisor correctly recommended
+ * nothing and there are no cards at all.
+ *
+ * A local `busy` guard rather than a global `sending` one, so flagging a turn does not disable
+ * the composer or the other turns' toggles — this is not a model call.
+ */
+function ReviewToggle({
+  message,
+  onSetReviewed,
+}: {
+  message: AdvisorMessage;
+  onSetReviewed: (messageId: string, reviewed: boolean) => Promise<void>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const reviewed = message.reviewed_at != null;
+
+  // A turn that only exists client-side (an optimistic id from a non-streaming send that has
+  // not been replaced yet) has no row to flag.
+  if (message.id.startsWith('local-') || message.id.startsWith('pending-')) return null;
+
+  return (
+    <div className="ml-auto flex items-center gap-1.5">
+      {reviewed ? (
+        <Badge
+          variant="secondary"
+          className="text-[10px]"
+          title={
+            message.reviewed_by
+              ? `Reviewed by ${message.reviewed_by} at ${new Date(message.reviewed_at as string).toLocaleString()}`
+              : undefined
+          }
+          data-testid="advisor-reviewed-badge"
+        >
+          Reviewed
+        </Badge>
+      ) : null}
+      <button
+        className="text-[10px] text-muted-foreground underline decoration-dotted disabled:opacity-50"
+        disabled={busy}
+        onClick={() => {
+          setBusy(true);
+          void onSetReviewed(message.id, !reviewed).finally(() => setBusy(false));
+        }}
+        data-testid="advisor-review-toggle"
+        aria-pressed={reviewed}
+      >
+        {reviewed ? 'Unmark' : 'Mark reviewed'}
+      </button>
     </div>
   );
 }

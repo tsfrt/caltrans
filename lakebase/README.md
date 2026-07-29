@@ -53,8 +53,9 @@ than the token lifetime will fail mid-session.
 ## Applying schema and grants
 
 ```bash
-# Resolves the direct endpoint host, mints a short-lived Lakebase OAuth token,
-# and applies 001_schema.sql + 002_schema_advisor.sql in one transaction.
+# Resolves the direct endpoint host, mints a short-lived Lakebase OAuth token, and
+# applies every NNN_*.sql except the grants files, in numeric order, in one
+# transaction. A new migration is picked up by the glob — nothing to update here.
 scripts/lakebase/apply.sh schema
 
 # Run only after `databricks bundle deploy` has created the app SP Postgres role.
@@ -65,10 +66,16 @@ scripts/lakebase/apply.sh grants
 scripts/lakebase/apply.sh verify
 ```
 
-`001_schema.sql` and `002_schema_advisor.sql` are idempotent (`IF NOT EXISTS` /
-`ON CONFLICT DO NOTHING`), so they are safe to re-run and usable as a migration
-baseline. The schema step uses `psql --single-transaction` so a partial apply
-rolls back.
+`001_schema.sql`, `002_schema_advisor.sql` and `004_schema_advisor_review.sql`
+(advisor message review flag) are idempotent (`IF NOT EXISTS` / `ON CONFLICT DO
+NOTHING`), so they are safe to re-run and usable as a migration baseline. The
+schema step uses `psql --single-transaction` so a partial apply rolls back.
+
+⚠️ **Name a new migration `NNN_*.sql` and it is applied automatically.** The
+`schema` mode globs `[0-9][0-9][0-9]_*.sql` (excluding `*_grants_*`) rather than
+naming files, because it previously matched only `001_*`/`002_*`: a migration
+added after that was silently SKIPPED, and the app deployed against a database
+missing its columns — failing at runtime, in the deployed app only.
 
 The deployment order is deliberate:
 

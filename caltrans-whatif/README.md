@@ -297,13 +297,22 @@ from the data rather than estimated.
 
 ### Lakebase schema
 
-`lakebase/002_schema_advisor.sql` (idempotent; applied out of band, not from app startup).
+`lakebase/002_schema_advisor.sql`, plus `lakebase/004_schema_advisor_review.sql` for the review
+flag (both idempotent; applied out of band, not from app startup).
 
 | Table | Purpose |
 |---|---|
 | `app.advisor_sessions` | One row per chat. Anchor (`reading_date`, `bucket_idx`, `local_hour`, `local_time`, `corridor`) **plus** `snapshot_kpis JSONB` — an immutable copy of the aggregates the model saw. |
-| `app.advisor_messages` | One row per turn: role, content, `model_endpoint`, token counts, `latency_ms`, `finish_reason`, `transport`, and the verbatim `recommendations JSONB`. Indexed `(session_id, created_at)`. |
+| `app.advisor_messages` | One row per turn: role, content, `model_endpoint`, token counts, `latency_ms`, `finish_reason`, `transport`, and the verbatim `recommendations JSONB`. Indexed `(session_id, created_at)`. Also `reviewed_at`/`reviewed_by` — the human-review flag (004). |
 | `app.advisor_recommendations` | One row per discrete recommendation, FK to session + message, `ON DELETE CASCADE`. |
+
+**The review flag is on the message, not the recommendation.** `reviewed_at IS NOT NULL` is the
+boolean and `reviewed_by` records who set it, via
+`POST /api/advisor/sessions/:id/messages/:messageId/review`. It is independent of
+`advisor_recommendations.scenario_id` (the M2 accepted → scenario → run lifecycle, still
+unbuilt): the prompt treats "the data does not support a recommendation" as a correct answer, and
+such a turn produces zero recommendation rows — yet is exactly the kind of assessment worth
+recording that a human read.
 
 **Why the snapshot is denormalised onto the session:** a recommendation is only meaningful
 against the traffic state that produced it. The underlying table is synthetic and can be

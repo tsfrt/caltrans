@@ -93,6 +93,12 @@ export interface AdvisorMessage {
   transport?: string | null;
   recommendations?: Recommendation[] | null;
   created_at: string;
+  /**
+   * Human review of this turn. `reviewed_at != null` is the flag. Assistant turns only —
+   * see lakebase/004_schema_advisor_review.sql.
+   */
+  reviewed_at?: string | null;
+  reviewed_by?: string | null;
   /** Set while an assistant turn is still streaming. */
   pending?: boolean;
 }
@@ -196,6 +202,8 @@ export interface UseAdvisorResult {
   send: (content: string) => Promise<void>;
   open: (sessionId: string) => Promise<void>;
   remove: (sessionId: string) => Promise<void>;
+  /** Set or clear the human-reviewed flag on one assistant turn. */
+  setReviewed: (messageId: string, reviewed: boolean) => Promise<void>;
   reset: () => void;
 }
 
@@ -466,6 +474,39 @@ export function useAdvisor(): UseAdvisorResult {
     [session, sendTo, transport],
   );
 
+  /**
+   * Flag one assistant turn as reviewed (or clear it).
+   *
+   * The server's returned row is applied in place rather than refetching the session: the
+   * transcript may be long, and the only field that changed is on one message. `reviewed_at`
+   * comes from the server (Postgres `now()`), never from the client clock, so what shows is
+   * what is persisted.
+   */
+  const setReviewed = useCallback(
+    async (messageId: string, reviewed: boolean) => {
+      if (!session) return;
+      try {
+        const data = await json<{ message: AdvisorMessage }>(
+          await fetch(`/api/advisor/sessions/${session.id}/messages/${messageId}/review`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ reviewed }),
+          }),
+        );
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === messageId
+              ? { ...m, reviewed_at: data.message.reviewed_at, reviewed_by: data.message.reviewed_by }
+              : m,
+          ),
+        );
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to update review state');
+      }
+    },
+    [session],
+  );
+
   const remove = useCallback(
     async (sessionId: string) => {
       try {
@@ -495,6 +536,7 @@ export function useAdvisor(): UseAdvisorResult {
     send,
     open,
     remove,
+    setReviewed,
     reset,
   };
 }

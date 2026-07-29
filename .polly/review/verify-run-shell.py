@@ -14,9 +14,12 @@ import tempfile
 import yaml
 
 EXPR = re.compile(r"\$\{\{[^}]*\}\}")
-files = sorted(glob.glob(".github/workflows/*.yml")) + [
-    ".github/actions/databricks-setup/action.yml"
-]
+# Glob the composite actions rather than naming them: ensure-python was added for blocker 7
+# and carries the Homebrew provisioning shell, so a hardcoded list would skip exactly the
+# new code this check exists to cover.
+files = sorted(glob.glob(".github/workflows/*.yml")) + sorted(
+    glob.glob(".github/actions/*/action.yml")
+)
 
 fail = 0
 checked = 0

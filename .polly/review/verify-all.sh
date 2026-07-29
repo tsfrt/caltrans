@@ -11,7 +11,9 @@ note() { printf '\n=== %s ===\n' "$1"; }
 ck() { if [ "$1" -eq 0 ]; then echo "PASS"; else echo "FAIL"; fails=$((fails + 1)); fi; }
 
 note "1. Every workflow + action YAML parses"
-for f in .github/workflows/*.yml .github/actions/databricks-setup/action.yml; do
+# Glob the actions dir rather than naming databricks-setup: ensure-python was added for
+# blocker 7, and a hardcoded list silently stops covering new composite actions.
+for f in .github/workflows/*.yml .github/actions/*/action.yml; do
   python3 -c "import yaml,sys; yaml.safe_load(open('$f')); print('OK  $f')" || fails=$((fails + 1))
 done
 
@@ -103,6 +105,39 @@ if grep -rn 'setup-cli@' .github/ | grep -vq 'setup-cli@v1\.7\.0'; then
 else
   echo "PASS: all pins are v1.7.0"
 fi
+
+note "3i. blocker 7: zero setup-python USES, zero bare \`python\`, all 3 sites on ensure-python"
+python3 - <<'PY' || exit 1
+import glob, re, sys, yaml
+# Structural, not grep: these files legitimately DISCUSS setup-python and bare `python` in
+# comments explaining why they were removed, so scan parsed `uses:`/`run:` values only.
+need = {'.github/workflows/ci.yml', '.github/workflows/deploy-main.yml',
+        '.github/workflows/preview-up.yml'}
+bad = []
+for f in sorted(glob.glob('.github/workflows/*.yml')) + sorted(glob.glob('.github/actions/*/action.yml')):
+    d = yaml.safe_load(open(f))
+    steps = ([s for j in d['jobs'].values() for s in (j.get('steps') or [])]
+             if 'jobs' in d else list(d['runs'].get('steps') or []))
+    uses = [s.get('uses') or '' for s in steps]
+    if any('setup-python' in u for u in uses):
+        bad.append(f'{f}: still USES actions/setup-python'); continue
+    for s in steps:
+        code = '\n'.join(l for l in (s.get('run') or '').split('\n')
+                         if not l.strip().startswith('#'))
+        if re.search(r'(^|[^\w./-])python(\s|$)', code, re.M):
+            bad.append(f"{f}: bare `python` in step {s.get('name')!r}")
+        if re.search(r'\bsudo\b', code):
+            bad.append(f"{f}: sudo in step {s.get('name')!r}")
+    if f in need:
+        if not any(u.endswith('/actions/ensure-python') for u in uses):
+            bad.append(f'{f}: does NOT use ./.github/actions/ensure-python')
+        else:
+            print(f'  OK   {f}: uses ensure-python')
+for b in bad: print('  FAIL', b)
+print('  => all 3 setup-python sites replaced; no bare python; no sudo' if not bad else '  => REGRESSION')
+sys.exit(1 if bad else 0)
+PY
+ck $?
 
 note "4. command -v jq guard present in each workflow that needs it"
 python3 - <<'PY' || exit 1

@@ -166,17 +166,23 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      # actions/python-versions publishes python-3.12.x-darwin-arm64, so this
-      # resolves on Apple Silicon. It also means the job does not depend on the
-      # bare-macOS /usr/bin/python3 (an Xcode Command Line Tools stub).
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
+      # Provisions python3 via Homebrew instead of actions/setup-python, which CANNOT work on this
+      # self-hosted Mac: it hardcodes /Users/runner/hostedtoolcache on macOS and overwrites
+      # RUNNER_TOOL_CACHE in-process, so the installer died on `mkdir: /Users/runner: Permission
+      # denied` and no workflow env: or runner .env can override it. Full explanation, with the
+      # upstream source, in the action itself. This step is what previously made this job RED.
+      - name: Ensure Python
+        uses: ./.github/actions/ensure-python
 
       # tools/ is stdlib-only, so this gate needs no installs.
+      #
+      # `python3`, NOT bare `python`: setup-python used to supply a bare `python` shim, but
+      # Homebrew's python@3.12 is an altinstall and ships bare `python` only in libexec/bin. The
+      # action does export that directory, so `python` would in fact resolve -- but `python3` is
+      # what every other call site in this repo uses (scripts/lakebase/apply.sh,
+      # scripts/preview/strip-self-url.sh), so match them rather than depend on the export alone.
       - name: Check rendered scenario SQL
-        run: python -m tools.scenario_sql.render --check
+        run: python3 -m tools.scenario_sql.render --check
 
   bundle-validate:
     name: Databricks bundle validate

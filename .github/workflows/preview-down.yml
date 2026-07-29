@@ -28,14 +28,23 @@ jobs:
     # Forks never got a preview (preview-up skips them), so there is nothing to tear down and no
     # secrets to do it with.
     if: github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    # LABELS of the self-hosted runner, not its name — see the longer note in preview-up.yml.
+    # Teardown especially must not sit unschedulable in a queue: an unrun teardown is the leak
+    # this workflow exists to prevent.
+    runs-on: [self-hosted, macOS, ARM64]
     environment: preview
     timeout-minutes: 30
 
     steps:
       # Checks out the PR's merge/head ref, which still exists at close time. Only the scripts
       # are needed, and they read no PR-specific state beyond the number.
+      #
+      # `clean: true` matters on a persistent runner: teardown asserts on `bundle validate` output,
+      # and a stale local .databricks/ state dir left by an earlier run is exactly the kind of
+      # leftover that could make those assertions describe the wrong deployment.
       - uses: actions/checkout@v4
+        with:
+          clean: true
 
       - uses: ./.github/actions/databricks-setup
         with:

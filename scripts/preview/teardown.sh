@@ -34,7 +34,7 @@ PR="${1:-}"; require_pr_number "$PR"
 
 APP_NAME="$(preview_app_name "$PR")"
 BRANCH_PATH="$(preview_branch_path "$PR")"
-mapfile -t BUNDLE_VARS < <(preview_bundle_vars "$PR")
+read_bundle_vars BUNDLE_VARS "$PR"
 
 # Refuse to proceed if the derived names somehow collide with production. These can only fire if
 # lib.sh is edited wrongly, which is exactly when a guard earns its keep.

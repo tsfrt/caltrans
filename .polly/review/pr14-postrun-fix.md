@@ -125,13 +125,50 @@ worse than 3s, and it scales with npm cache directory size, which on a persisten
 **grows monotonically** — it is never wiped, because it lives outside the workspace that
 `git clean -ffdx` scrubs. That growth is why this degrades over time rather than staying at 3s.
 
-**Unverified:** I could not measure the post-step duration on the `caltrans` Mac itself. Both
-completed self-hosted-labelled runs I found (30470147029, 30471321508) failed at the
-`databricks-setup` step, which **skipped** `actions/setup-node@v4` entirely — so no
-`Post Set up Node.js` step was ever registered in them, and the API confirms they were
-dispatched to `ubuntu-latest` anyway. The mechanism is confirmed from source and the relative
-cost is confirmed from hosted timings; the absolute seconds on the Mac are inferred, not
-measured.
+### MEASURED ON THE REAL MAC — this was no longer necessary to infer
+
+Pushing the fix to `main` triggered CI on the `caltrans` runner, and the immediately preceding
+run on the same box was still pre-fix. Direct A/B on the *same job*, *same runner*:
+
+**BEFORE (run 30480695624 @ 958801b, runner=`caltrans`, `cache: npm` present):**
+
+```
+  [8]  Unit tests            18:39:50 -> 18:39:54   (4s)
+  [15] Post Set up Node.js   18:39:54 -> 18:52:46   (12m 52s)  <-- !!!
+```
+
+The log is unambiguous:
+
+```
+Post Set up Node.js  [command]/usr/bin/tar --posix -cf cache.tzst ... --use-compress-program zstdmt
+Post Set up Node.js  Sent 0 of 2340568644 (0.0%), 0.0 MBs/sec        <-- x321 consecutive lines
+Post Set up Node.js  Sent 67108864 of 2340568644 (2.9%), 0.2 MBs/sec
+Post Set up Node.js  Sent 603979776 of 2340568644 (25.8%), 0.9 MBs/sec
+Post Set up Node.js  ##[error]The operation was canceled.
+```
+
+**A 2.34 GB tarball** (`2340568644` bytes) uploading at **0.2-0.9 MB/s** from a residential
+uplink. It sat at `Sent 0` for 321 consecutive seconds, reached **25.8% after 12m52s**, and
+was then killed — only because my push superseded the run. Left alone it would have run for
+roughly **40+ minutes**, all of it after the job's real work had finished in 4 seconds.
+
+Also note `Set up Node.js` logging `npm cache is not found` on the restore side: it was paying
+the full upload while getting *nothing* back from the remote cache.
+
+**AFTER (run 30481710233 @ b1e167b, runner=`caltrans`, no `cache:` input):**
+
+```
+  [8]  Unit tests            18:53:55 -> 18:53:59   (4s)
+  [15] Post Set up Node.js   18:53:59 -> 18:53:59   (0s)   <-- no-op, as designed
+  [16] Post Check out repo   18:53:59 -> 18:54:00   (1s)
+  [17] Complete job          18:54:00 -> 18:54:00   (0s)
+```
+
+**12m52s (and climbing toward ~40m) → 0s.** Same job, same runner, same work.
+
+This also confirms the mechanism precisely: the 2.34 GB is the accumulated `~/.npm` on a
+persistent runner that is never wiped, which is exactly the unbounded-growth failure mode
+predicted from source — and on a single-job runner every second of it blocked the queue.
 
 ### Verdict
 
@@ -245,17 +282,18 @@ deploy/delete, create/delete-branch, or psql.
 
 ## 6. Stated plainly as UNVERIFIED
 
-- **Post-step duration on the `caltrans` Mac itself.** Not measured. Both self-hosted-labelled
-  runs I found failed early at `databricks-setup`, which skipped setup-node entirely, and the API
-  shows they were dispatched to `ubuntu-latest` regardless. Mechanism is confirmed from source;
-  absolute seconds on the Mac are inferred from the hosted 3s-vs-0s delta plus the fact that a
-  persistent runner's `~/.npm` grows without bound.
+- ~~Post-step duration on the Mac itself~~ — **NOW MEASURED.** 12m52s (killed at 25.8% of a
+  2.34 GB upload) before, 0s after, same job and runner. See the A/B above.
+- ~~The workflows have not been executed with these changes~~ — **the `app` job now has a green
+  self-hosted run** (30481710233). Still unexercised on the real box at time of writing:
+  `deploy-main` (in progress) and **both preview workflows** — so the jq install, the
+  `brew --prefix` derivation and the new setup-python step are verified by parse and by
+  construction, NOT by a green run. The preview paths only fire on PR open/close.
 - **Whether Homebrew / libpq / jq are actually present on the box.** Cannot inspect it from here.
   The workflows now fail loudly with `::error::` instead of a bare 127. See the prerequisites
   checklist.
-- **The workflows have not been executed with these changes.** Everything below the YAML/shell
-  parse level (does `brew install jq` succeed there, does setup-python resolve darwin-arm64 on
-  that box) is verified by construction and by upstream docs, not by a green run.
+- **Fork-PR skipping has not been observed empirically** — no fork PR exists to test against. The
+  expression is verified by truth table against documented dereference semantics, not by a run.
 - **`git clean -ffdx` wall-clock on that workspace.** Not measured; argued to be irrelevant to the
   post-run complaint because it runs in checkout's MAIN step, which the source confirms.
 - **GitHub Actions `==` vs `||` operator precedence** is not documented; I parenthesized rather
@@ -263,7 +301,58 @@ deploy/delete, create/delete-branch, or psql.
 
 ---
 
-## 7. Landing note
+## 7. BLOCKER 7 — FOUND WHILE VERIFYING, NOT IN THE BRIEF, STILL OPEN
+
+`actions/setup-python@v5` **cannot install on this runner today.** Both `Scenario SQL drift check`
+(ci.yml) and `Deploy app and migrate Lakebase` (deploy-main.yml) fail at that step:
+
+```
+Set up Python  Check if Python hostedtoolcache folder exist...
+Set up Python  Creating Python hostedtoolcache folder...
+Set up Python  ##[error]mkdir: /Users/runner: Permission denied
+Set up Python  ##[error]The process '/bin/bash' failed with exit code 1
+```
+
+**This is PRE-EXISTING, not caused by these changes.** `Scenario SQL drift check` failed
+identically at `958801b` (run 30480695624), before any of this work. It was simply invisible
+earlier because the merged PR had never had a full self-hosted CI run complete.
+
+**Root cause, and why the usual workaround does NOT apply.** The runner user here is
+`thomas.seufert` (`/Users/thomas.seufert/gh_runner/...`), not `runner`. Per
+`actions/setup-python` docs, the macOS builds from `actions/python-versions` are compiled in
+`/Users/runner/hostedtoolcache` and are **non-relocatable** — they "require to be installed only
+in `/Users/runner/hostedtoolcache`". So the normal self-hosted escape hatch,
+`AGENT_TOOLSDIRECTORY`, does **not** work for macOS Python: pointing it elsewhere yields a broken
+interpreter rather than a working one.
+
+**This is a runner-provisioning fix, not a workflow fix**, and it needs `sudo` on the box — which
+is why I did not attempt it from CI. One-time, on the `caltrans` Mac:
+
+```bash
+sudo mkdir -p /Users/runner/hostedtoolcache
+sudo chown -R "$(whoami):$(id -gn)" /Users/runner/hostedtoolcache
+```
+
+**Consequences until that is done:** `ci.yml`'s `scenario-sql` job is RED on `main`, and
+`deploy-main.yml` dies at step 5 — before `Apply Lakebase schema`, so **production schema and
+grants migrations do not run**. Note this is a *different* failure from Blocker 1: the `mapfile`
+fix was necessary but `apply.sh` is not even reached yet.
+
+**This also affects the setup-python step I added to `preview-up.yml` for Blocker 4.** That step
+is correct in itself — the preview path genuinely needs a real `python3` — but it will fail the
+same way on this box until the directory exists. I left it in rather than reverting it: removing
+it would trade a loud, one-line-diagnosable failure for the silent Xcode-stub failure it was added
+to prevent, and the underlying provisioning gap has to be closed regardless for `deploy-main` to
+work at all.
+
+**Alternative worth considering** (not taken here, as it is a design change): drop `setup-python`
+entirely and use `brew install python@3.12` with the same guarded/idempotent pattern as jq and
+libpq. That sidesteps the non-relocatable-build problem completely and needs no sudo. If the
+directory fix proves awkward, this is the better long-term shape on a self-hosted Mac.
+
+---
+
+## 8. Landing note
 
 PR #14 was **merged at `7b11a4a`** — its original head, before any of this work. None of these 5
 commits were in it, so every issue above was live on `main`. On the user's instruction these were

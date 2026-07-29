@@ -51,16 +51,24 @@ jobs:
         uses: actions/checkout@v4
 
       # actions/checkout@v4 defaults to `clean: true`, which runs `git clean -ffdx`
-      # and `git reset --hard`. On this persistent runner that is what clears
+      # and `git reset --hard` in its MAIN step. On this persistent runner that is what clears
       # leftover node_modules/, dist/ and .databricks/ bundle state from the
       # previous deploy. Do not set `clean: false` here: a stale .databricks/
       # would let `bundle deploy` act on a cached, wrong deployment state.
+      #
+      # NO `cache: npm`. It would add a post step that tars ~/.npm and uploads it to the
+      # Actions cache service. The cached path is local but the backend is remote, and this
+      # runner is persistent: ~/.npm sits outside $GITHUB_WORKSPACE, so `git clean -ffdx`
+      # never touches it and it already survives between deploys on local disk. `npm ci` gets
+      # its speedup from that local directory regardless; the upload is pure cost, paid at the
+      # end of the job on a runner that takes one job at a time. Restore `cache: npm` and
+      # `cache-dependency-path: caltrans-whatif/package-lock.json` only if this moves back to
+      # a GitHub-hosted runner, where the box is destroyed and the upload is the whole point.
+      # See the longer note in ci.yml.
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: npm
-          cache-dependency-path: caltrans-whatif/package-lock.json
 
       # Safe on self-hosted macOS ARM64: setup_release.sh maps RUNNER_OS=macOS ->
       # darwin and RUNNER_ARCH=ARM64 -> arm64, and databricks_cli_1.7.0_darwin_arm64.zip

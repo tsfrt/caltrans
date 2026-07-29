@@ -38,15 +38,39 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      # Works on self-hosted macOS ARM64: setup-node publishes darwin-arm64
-      # builds, and `cache: npm` caches ~/.npm (the runner user's home, outside
-      # the workspace, so `git clean` cannot corrupt it and it stays writable).
+      # Works on self-hosted macOS ARM64: setup-node publishes darwin-arm64 builds, and on a
+      # self-hosted runner it installs into RUNNER_TOOL_CACHE, which persists — so after the
+      # first job this resolves from disk instead of downloading.
+      #
+      # NO `cache: npm` ON PURPOSE. It is not a no-op that we are skipping for tidiness; it
+      # actively costs wall clock here, and the cost lands in the POST step:
+      #
+      #   * `cache: npm` makes setup-node register a post step (`dist/cache-save/index.js`)
+      #     that tars the npm cache directory and UPLOADS it to the GitHub Actions cache
+      #     SERVICE over the network. The cached PATH is local (~/.npm); the cache BACKEND is
+      #     remote. Those are different things, and an earlier version of this comment
+      #     conflated them.
+      #   * On a GitHub-hosted VM that upload is the entire point — the machine is destroyed,
+      #     so the cache has to be shipped off-box to survive.
+      #   * This runner is PERSISTENT. ~/.npm lives in the runner user's home, OUTSIDE
+      #     $GITHUB_WORKSPACE, so `git clean -ffdx` never touches it and it survives between
+      #     jobs on local disk. `npm ci` reads it directly and is fast either way. The remote
+      #     copy restores, over the network, bytes that never left the machine.
+      #   * The upload fires on a cache MISS (`if (primaryKey === state) return;` in
+      #     cache-save.ts). Actions caches are branch-scoped and setup-node passes no
+      #     restoreKeys for npm, so every new PR branch misses, as does anything evicted by
+      #     the 7-day idle rule or the 10 GB repo ceiling. It also burns that quota.
+      #   * This runner takes ONE job at a time, so a post step is not free background work:
+      #     it delays the next queued job 1:1.
+      #
+      # Without a `cache:` input the post step short-circuits immediately and is measurably
+      # free. IF THIS REPO EVER MOVES BACK TO GITHUB-HOSTED RUNNERS, restore
+      # `cache: npm` + `cache-dependency-path: caltrans-whatif/package-lock.json` — there the
+      # tradeoff inverts and the upload is worth it.
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: npm
-          cache-dependency-path: caltrans-whatif/package-lock.json
 
       # `postinstall` runs `typegen`, which needs a live warehouse. It is written to
       # be non-fatal (`|| echo ...`) and falls back to the committed

@@ -66,14 +66,21 @@ jobs:
       #
       # Works as-is on self-hosted macOS ARM64: setup-node publishes darwin-arm64 Node builds, and
       # on a self-hosted runner it installs into RUNNER_TOOL_CACHE (persisting across runs, so
-      # after the first job this is a cache hit rather than a download). `cache: npm` keys off the
-      # lockfile and writes to the actions/cache backend, not a local dir, so nothing here needs a
-      # privileged or pre-created path. Kept unchanged.
+      # after the first job this is a cache hit rather than a download).
+      #
+      # NO `cache: npm`. An earlier version of this comment had the mechanism right — it does
+      # write to the actions/cache backend rather than a local dir — but treated that as a pure
+      # win. It is not, on a persistent runner: that remote write is a POST step that tars the
+      # npm cache dir and uploads it, and ~/.npm already survives here on local disk (it lives
+      # outside $GITHUB_WORKSPACE, so checkout's `git clean -ffdx` cannot reach it). `npm ci`
+      # below is fast because of that local directory, not because of the remote copy — so the
+      # upload buys nothing and is paid at the end of every job that misses the cache key, on a
+      # runner that runs one job at a time. Restore `cache: npm` +
+      # `cache-dependency-path: caltrans-whatif/package-lock.json` if this ever moves back to a
+      # GitHub-hosted runner. See the longer note in ci.yml.
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: npm
-          cache-dependency-path: caltrans-whatif/package-lock.json
 
       # deploy.sh phase 3 shells out to scripts/lakebase/apply.sh, which hard-requires `psql`
       # (`require_cmd psql` -> exit 127). Without a resolvable psql the grants step dies and the

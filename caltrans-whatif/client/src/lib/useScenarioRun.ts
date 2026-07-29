@@ -108,6 +108,20 @@ export interface ScenarioKpiRow {
   conservation_error_veh: number;
 }
 
+function isScenarioKpiScope(scope: unknown): scope is ScenarioKpiRow['scope'] {
+  return scope === 'NETWORK' || scope === 'CORRIDOR' || scope === 'SEGMENT';
+}
+
+function toScenarioKpiRows(rows: unknown): ScenarioKpiRow[] {
+  if (!Array.isArray(rows)) return [];
+  return rows.filter(
+    (row): row is ScenarioKpiRow =>
+      typeof row === 'object' &&
+      row !== null &&
+      isScenarioKpiScope((row as { scope?: unknown }).scope),
+  );
+}
+
 /** A committed scenario: the request the user pressed Run with. */
 export interface CommittedScenario {
   request: ScenarioRequest;
@@ -218,7 +232,7 @@ export function useScenarioRun(
 
   const kpiRows = useMemo(() => {
     if (!committed || !kpiQ.data || kpiQ.runKey !== runKey) return null;
-    return kpiQ.data as unknown as ScenarioKpiRow[];
+    return toScenarioKpiRows(kpiQ.data);
   }, [committed, kpiQ.data, kpiQ.runKey, runKey]);
 
   if (!committed) return EMPTY_RUN;

@@ -148,11 +148,24 @@ databricks apps get caltrans-whatif-pr-42 -o json | jq -r .service_principal_cli
 ```
 
 and passes it to the shared applier. **The grant SQL is not duplicated** — `lakebase/**` is owned
-by the main-deploy workflow.
+by the main-deploy workflow. The applier is invoked as
 
-> **Dependency:** this requires `scripts/lakebase/apply.sh --grants-only --endpoint <p> --sp-role <uuid>`
-> and `lakebase/grants_advisor.sql` accepting `psql -v sp_role=`. If that has not landed,
-> `apply-lakebase-grants.sh` fails with an explicit message instead of a confusing psql error.
+```bash
+scripts/lakebase/apply.sh grants \
+  --project caltrans-app --branch pr-42 --endpoint primary --sp-role <uuid>
+```
+
+Two details of that interface are easy to get wrong, and both fail in ways a green deploy hides.
+`grants` is a **positional mode**, not a `--grants-only` flag — apply.sh reads `MODE="$1"; shift`
+and its option loop exits 2 on any unrecognized token. And `--project`/`--branch`/`--endpoint` each
+take a bare **ID**, not a path: apply.sh composes
+`projects/<project>/branches/<branch>/endpoints/<endpoint>` itself, so passing a full resource path
+yields a doubled path that does not resolve. `--branch` is the override that makes the call
+preview-scoped — its default is `production`. `PGUSER` is read from the environment (or `--pg-user`).
+
+> **Dependency:** this requires `scripts/lakebase/apply.sh` and `lakebase/003_grants_advisor.sql`
+> accepting `psql -v sp_role=`. If that has not landed, `apply-lakebase-grants.sh` fails with an
+> explicit message instead of a confusing psql error.
 
 ## Teardown is a cost control
 
@@ -216,6 +229,9 @@ Auth is **PAT**. Do not set `DATABRICKS_AUTH_TYPE` (that is an OAuth-M2M require
 break PAT auth), and no service principal or extra Postgres role is needed.
 
 ## Running by hand
+
+Needs `databricks`, `jq`, and `psql` on PATH — `deploy.sh` phase 3 delegates to
+`scripts/lakebase/apply.sh`, which exits 127 without a Postgres client.
 
 ```bash
 export DATABRICKS_HOST=... DATABRICKS_TOKEN=...

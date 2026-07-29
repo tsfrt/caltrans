@@ -50,6 +50,17 @@ jobs:
           cache: npm
           cache-dependency-path: caltrans-whatif/package-lock.json
 
+      # deploy.sh phase 3 shells out to scripts/lakebase/apply.sh, which hard-requires `psql`
+      # (`require_cmd psql` -> exit 127). The runner image ships no postgresql-client, so without
+      # this the grants step dies and the preview app deploys LOOKING healthy while every advisor
+      # write fails with 42501 at runtime. Mirrors deploy-main.yml's install of the same client.
+      - name: Install PostgreSQL client 17
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y postgresql-client-17
+
       - name: Install app dependencies
         working-directory: caltrans-whatif
         # `npm ci` runs postinstall -> typegen, which needs a live warehouse. It is deliberately

@@ -12,6 +12,14 @@ concurrency:
   group: deploy-main
   cancel-in-progress: false
 
+# Persistent-runner note: a self-hosted runner inherits the environment of the
+# service that launched it, unlike a fresh GitHub VM. These explicit values are
+# what make the deploy deterministic — DATABRICKS_HOST/TOKEN here take precedence
+# over any ~/.databrickscfg on the box, and the PG* names below are set rather
+# than inherited. apply.sh additionally passes a full `host=... dbname=... user=...`
+# conninfo string, whose explicit keywords beat any leaked PGHOST/PGDATABASE. If a
+# stray DATABRICKS_CONFIG_PROFILE or PGSSLROOTCERT is ever exported in the runner
+# service environment, unset it there — it would otherwise apply to every run.
 env:
   DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
   DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
@@ -21,14 +29,32 @@ env:
   PGUSER: thomas.seufert@databricks.com
   LAKEBASE_SP_ROLE: 4a27f46d-04b9-4580-9767-44b505a4cf50
 
+# This job must run on the self-hosted `caltrans` runner: it deploys to the
+# Databricks workspace and connects to Lakebase over Postgres, neither of which
+# is reachable from a GitHub-hosted runner.
+#
+# `runs-on:` matches LABELS, never the runner's name. The runner is *named*
+# caltrans but its labels are exactly [self-hosted, macOS, ARM64], so
+# `runs-on: caltrans` would queue forever with no error — the job would just sit
+# pending, and this deploy would never run. Do not add a `caltrans` entry to this
+# list until that label actually exists.
+#
+# If a second macOS ARM64 runner is ever registered, add a custom `caltrans`
+# label to this one (Settings > Actions > Runners > caltrans > Labels) and switch
+# this list to [self-hosted, caltrans] to pin the deploy back to it.
 jobs:
   deploy:
     name: Deploy app and migrate Lakebase
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64]
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      # actions/checkout@v4 defaults to `clean: true`, which runs `git clean -ffdx`
+      # and `git reset --hard`. On this persistent runner that is what clears
+      # leftover node_modules/, dist/ and .databricks/ bundle state from the
+      # previous deploy. Do not set `clean: false` here: a stale .databricks/
+      # would let `bundle deploy` act on a cached, wrong deployment state.
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
@@ -36,15 +62,106 @@ jobs:
           cache: npm
           cache-dependency-path: caltrans-whatif/package-lock.json
 
+      # Safe on self-hosted macOS ARM64: setup_release.sh maps RUNNER_OS=macOS ->
+      # darwin and RUNNER_ARCH=ARM64 -> arm64, and databricks_cli_1.7.0_darwin_arm64.zip
+      # is published upstream. Needs only curl and unzip, uses no sudo, and installs
+      # under $RUNNER_TEMP with a $GITHUB_PATH entry, so it leaves no state behind.
       - name: Set up Databricks CLI
         uses: databricks/setup-cli@v1.7.0
 
-      - name: Install PostgreSQL client 17
+      # scripts/lakebase/apply.sh does `require_cmd python3` and shells out to it to
+      # parse the CLI's JSON. On ubuntu-latest python3 is guaranteed; on a bare macOS
+      # box /usr/bin/python3 is an Xcode Command Line Tools stub that can prompt or be
+      # missing entirely. Pin a real interpreter so apply.sh cannot exit 127 here.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # This runner is macOS: there is no apt-get, so the previous Debian/pgdg
+      # install died here, apply.sh then hit `require_cmd psql` and exited 127, and
+      # the production grants migration silently never applied — the app deployed
+      # looking healthy while every advisor write failed with 42501 at runtime.
+      #
+      # The runner is persistent, so this must be idempotent and must NOT reinstall
+      # on every run: if psql already resolves, do nothing. Homebrew's libpq is
+      # keg-only, so `brew install libpq` links nothing onto PATH — the
+      # $GITHUB_PATH line below is mandatory for the later apply.sh steps to see
+      # psql. The prefix is /opt/homebrew on Apple Silicon and /usr/local on Intel,
+      # so it is read from `brew --prefix` rather than hardcoded.
+      #
+      # No sudo: this runner may not have passwordless sudo, and `brew` must never
+      # be run under sudo anyway.
+      - name: Ensure PostgreSQL client (psql) is available
         run: |
-          sudo apt-get update
-          sudo apt-get install -y postgresql-common
-          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
-          sudo apt-get install -y postgresql-client-17
+          set -euo pipefail
+
+          if command -v psql >/dev/null 2>&1; then
+            echo "psql already on PATH: $(command -v psql) ($(psql --version))"
+            exit 0
+          fi
+
+          if ! command -v brew >/dev/null 2>&1; then
+            # Check the standard prefixes before giving up: brew is installed but a
+            # non-login shell may not have run its shellenv.
+            for candidate in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+              if [ -x "$candidate" ]; then
+                eval "$("$candidate" shellenv)"
+                break
+              fi
+            done
+          fi
+
+          if ! command -v brew >/dev/null 2>&1; then
+            echo "::error title=Runner setup incomplete::Homebrew is not installed on the self-hosted runner 'caltrans', so psql cannot be installed."
+            echo "Install it on that machine as the runner user, then re-run this workflow:" >&2
+            echo '  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"' >&2
+            echo '  eval "$(/opt/homebrew/bin/brew shellenv)"   # Apple Silicon prefix' >&2
+            echo "  brew install libpq" >&2
+            exit 1
+          fi
+
+          echo "Installing libpq via Homebrew (provides psql)..."
+          brew install libpq
+
+          # libpq is keg-only: nothing is symlinked into <prefix>/bin, so psql is only
+          # reachable at <prefix>/opt/libpq/bin. Export it for every LATER step.
+          BREW_PREFIX="$(brew --prefix)"
+          LIBPQ_BIN="$BREW_PREFIX/opt/libpq/bin"
+          if [ ! -x "$LIBPQ_BIN/psql" ]; then
+            # Fall back to brew's own answer before failing.
+            LIBPQ_BIN="$(brew --prefix libpq 2>/dev/null || true)/bin"
+          fi
+          if [ ! -x "$LIBPQ_BIN/psql" ]; then
+            echo "::error title=psql not found after install::brew install libpq succeeded but no psql binary was found under $BREW_PREFIX/opt/libpq/bin."
+            echo "Inspect the runner with: brew --prefix libpq && ls \"\$(brew --prefix libpq)/bin\"" >&2
+            exit 1
+          fi
+
+          echo "$LIBPQ_BIN" >> "$GITHUB_PATH"
+          echo "Added $LIBPQ_BIN to GITHUB_PATH ($("$LIBPQ_BIN/psql" --version))"
+
+      # Fail LOUDLY and early if psql still is not resolvable. Without this the next
+      # failure point is `require_cmd psql` inside apply.sh at migration time, which
+      # exits a bare 127 and reads like transient CI flake instead of "the production
+      # grants migration did not apply".
+      #
+      # Separate step on purpose: $GITHUB_PATH additions only take effect in
+      # SUBSEQUENT steps, so this is the first place the export above can be proven.
+      - name: Assert psql is on PATH
+        run: |
+          set -euo pipefail
+          if ! command -v psql >/dev/null 2>&1; then
+            echo "::error title=psql missing::psql is not on PATH, so the Lakebase schema and grants migrations cannot run."
+            echo "Every advisor write would then fail at runtime with SQLSTATE 42501 while this deploy reported success, so the deploy is being stopped here instead." >&2
+            echo "On the self-hosted runner 'caltrans', run:" >&2
+            echo "  brew install libpq" >&2
+            echo '  echo "$(brew --prefix libpq)/bin" # must contain psql' >&2
+            echo "PATH was: $PATH" >&2
+            exit 1
+          fi
+          echo "psql resolved: $(command -v psql)"
+          psql --version
 
       - name: Install app dependencies
         working-directory: caltrans-whatif

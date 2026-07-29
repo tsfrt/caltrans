@@ -1,0 +1,59 @@
+name: Databricks setup
+description: >-
+  Install the pinned Databricks CLI, authenticate with a PAT, and verify the identity CI is
+  actually running as. Shared by the preview-up and preview-down workflows.
+
+inputs:
+  databricks-host:
+    description: Workspace URL, e.g. https://example.cloud.databricks.com
+    required: true
+  databricks-token:
+    description: Personal access token for the workspace.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # Pinned to a full vX.Y.Z on purpose:
+    #   * there is NO floating `v1` tag on this action — `@v1` resolves to nothing (404), so a
+    #     full tag or SHA is mandatory, not stylistic;
+    #   * with no `version:` input the action installs the CLI version recorded in the repo at
+    #     that tag, so this ONE pin fixes both the action code and the CLI. v1.7.0 is the version
+    #     every command in these workflows was verified against.
+    #   * `databricks postgres` is Beta and documented as subject to change without notice, so
+    #     bump this deliberately and re-verify the branch commands rather than floating.
+    - uses: databricks/setup-cli@v1.7.0
+
+    - name: Configure authentication
+      shell: bash
+      env:
+        DATABRICKS_HOST: ${{ inputs.databricks-host }}
+        DATABRICKS_TOKEN: ${{ inputs.databricks-token }}
+      run: |
+        set -euo pipefail
+        if [[ -z "$DATABRICKS_HOST" || -z "$DATABRICKS_TOKEN" ]]; then
+          echo "::error::DATABRICKS_HOST and DATABRICKS_TOKEN must both be set. See docs/preview-environments.md."
+          exit 1
+        fi
+        # Export for every later step in the job. PAT auth needs only these two variables;
+        # DATABRICKS_AUTH_TYPE is deliberately NOT set — that is an OAuth-M2M requirement and
+        # setting it here would break PAT auth.
+        {
+          echo "DATABRICKS_HOST=$DATABRICKS_HOST"
+          echo "DATABRICKS_TOKEN=$DATABRICKS_TOKEN"
+        } >>"$GITHUB_ENV"
+
+    - name: Verify identity
+      shell: bash
+      env:
+        DATABRICKS_HOST: ${{ inputs.databricks-host }}
+        DATABRICKS_TOKEN: ${{ inputs.databricks-token }}
+      run: |
+        set -euo pipefail
+        # Fail here, with a readable message, rather than three steps later inside a deploy.
+        # The username matters and is not cosmetic: the bundle's state root is
+        # /Workspace/Users/${workspace.current_user.userName}/..., and lakebase grants must be
+        # applied by the human who OWNS the `app` schema. A token belonging to a different
+        # identity would deploy to a different state root and fail the grants.
+        databricks current-user me -o json | jq -r '"Authenticated as: \(.userName)"'
+        databricks --version

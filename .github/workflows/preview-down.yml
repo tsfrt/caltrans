@@ -1,0 +1,97 @@
+name: Preview down
+
+# Tear down a PR's preview when the PR closes.
+#
+# `pull_request: closed` fires on BOTH merge and plain close — GitHub has no separate "merged"
+# event — so this single path must handle both, and it does not inspect `merged` at all: a
+# preview is disposable either way.
+#
+# This is a COST control, not hygiene. An idle Lakebase branch floors at ~0.5 CU with a 24h
+# suspend timeout that cannot be lowered, and a project allows only 10 unarchived branches, so a
+# leaked branch bills indefinitely and eats a slot some future PR needs.
+on:
+  pull_request:
+    types: [closed]
+
+# Serialize against preview-up for the same PR, and do NOT cancel: a half-finished teardown is
+# exactly the leak this workflow exists to prevent.
+concurrency:
+  group: preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  teardown:
+    # Forks never got a preview (preview-up skips them), so there is nothing to tear down and no
+    # secrets to do it with.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    environment: preview
+    timeout-minutes: 30
+
+    steps:
+      # Checks out the PR's merge/head ref, which still exists at close time. Only the scripts
+      # are needed, and they read no PR-specific state beyond the number.
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/databricks-setup
+        with:
+          databricks-host: ${{ secrets.DATABRICKS_HOST }}
+          databricks-token: ${{ secrets.DATABRICKS_TOKEN }}
+
+      # No `npm ci` here: teardown never builds the app.
+      - name: Destroy preview app and Lakebase branch
+        id: teardown
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: scripts/preview/teardown.sh "$PR_NUMBER"
+
+      # Leave the sticky comment in place but mark it torn down, so anyone reopening the PR later
+      # does not follow a stale link to an app that no longer exists. Best-effort: a failure to
+      # edit a comment must not mask the teardown result.
+      - name: Mark sticky comment torn down
+        if: always()
+        continue-on-error: true
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const MARKER = '<!-- caltrans-preview-comment -->';
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number, per_page: 100,
+            });
+            const existing = comments.find(c => c.body?.includes(MARKER));
+            if (!existing) { core.info('No sticky preview comment to update'); return; }
+
+            const note = '### 🧹 Preview torn down\n\n'
+              + 'The preview app and its Lakebase branch were deleted when this PR closed. '
+              + 'Reopening the PR or pushing to it will build a fresh preview from `production`.\n\n'
+              + '<details><summary>Previous preview details</summary>\n\n';
+            const body = `${MARKER}\n${note}${existing.body.replace(MARKER, '').trim()}\n\n</details>`;
+            await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+
+      # teardown.sh already exits non-zero only when resources are still present, so a red run
+      # here means a genuine leak that needs a human. Spell that out — the whole point of making
+      # "nothing to clean up" exit 0 is that a failure on a closed PR should be believable.
+      - name: Explain failure
+        if: failure() && steps.teardown.outcome == 'failure'
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          {
+            echo "### ⚠️ Preview teardown did not fully succeed"
+            echo
+            echo "Resources for PR #${PR_NUMBER} may still exist and be billing."
+            echo "Check and clean up manually:"
+            echo
+            echo '```bash'
+            echo "databricks apps get caltrans-whatif-pr-${PR_NUMBER}"
+            echo "databricks postgres get-branch projects/caltrans-app/branches/pr-${PR_NUMBER}"
+            echo "scripts/preview/teardown.sh ${PR_NUMBER}   # safe to re-run"
+            echo '```'
+          } >>"$GITHUB_STEP_SUMMARY"

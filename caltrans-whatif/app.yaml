@@ -20,5 +20,14 @@ env:
   # (server/advisor/selfprobe.ts): the app calls its own public URL with a service-principal
   # OAuth token so the request traverses the real reverse proxy, then records whether the
   # response arrived incrementally or buffered into app.audit. Unset it to disable the probe.
+  #
+  # This value is the PRODUCTION app's URL and is correct only for the production app. A
+  # preview app deployed from this same source tree would otherwise self-probe production —
+  # writing preview diagnostics into the production app.audit table and reporting a health
+  # signal for the wrong deployment. Preview deploys therefore REMOVE this entry rather than
+  # rewrite it (the URL is not knowable until after the first deploy); the probe then
+  # self-disables, which is a diagnostic previews do not need.
+  # Done by scripts/preview/strip-self-url.sh, invoked from .github/workflows/preview-up.yml.
+  # Keyed on the ADVISOR_SELF_URL name, so keep this the only occurrence in the file.
   - name: ADVISOR_SELF_URL
     value: https://caltrans-whatif-7474656503943141.aws.databricksapps.com

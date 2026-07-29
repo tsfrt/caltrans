@@ -1,0 +1,130 @@
+name: Preview up
+
+# Create/refresh a per-PR preview: a copy-on-write Lakebase branch plus an app deployed against
+# it, then a sticky comment pointing at both.
+#
+# `synchronize` fires on every push to the PR, so everything downstream is written to be
+# idempotent — the Lakebase branch is reused, not recreated, and the comment is edited in place.
+#
+# The real logic lives in scripts/preview/*.sh, not here. Ordering between the phases is subtle
+# and load-bearing (see the header of scripts/preview/deploy.sh); keeping it in one reviewable
+# script beats spreading it across YAML steps where the constraints are invisible.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+# Serialize per PR. cancel-in-progress because on a rapid push sequence only the newest commit
+# matters; a superseded deploy racing the new one would leave the preview on an older build.
+concurrency:
+  group: preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write   # for the sticky comment
+
+jobs:
+  preview:
+    # Forked-PR runs would receive no secrets, so the deploy would fail confusingly halfway
+    # through. Skip them explicitly instead. (A `pull_request` trigger also gives forks a
+    # read-only token, so the sticky comment would fail too.)
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    environment: preview
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/databricks-setup
+        with:
+          databricks-host: ${{ secrets.DATABRICKS_HOST }}
+          databricks-token: ${{ secrets.DATABRICKS_TOKEN }}
+
+      # Node is needed because `apps deploy` builds the app (tsc + vite) as part of its
+      # validation pipeline. The repo pins no Node version anywhere — no engines field, no
+      # .nvmrc — so 22 is chosen here to match the version the app was developed against.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: caltrans-whatif/package-lock.json
+
+      - name: Install app dependencies
+        working-directory: caltrans-whatif
+        # `npm ci` runs postinstall -> typegen, which needs a live warehouse. It is deliberately
+        # non-fatal in package.json (generated types are committed), so a failure there is fine
+        # here; the fatal typegen happens later inside `apps deploy`, after UC grants exist.
+        run: npm ci
+
+      - name: Create or reuse the Lakebase branch
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: scripts/preview/create-branch.sh "$PR_NUMBER"
+
+      - name: Deploy the preview app
+        id: deploy
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: scripts/preview/deploy.sh "$PR_NUMBER"
+
+      # Values go through `env:` rather than being interpolated into the script text, so the
+      # shell never re-parses them. They come from our own naming and the Databricks API, but
+      # `${{ }}` inside `run:` is textual substitution and this is the habit worth keeping.
+      - name: Render comment body
+        id: body
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          APP_NAME: ${{ steps.deploy.outputs.app_name }}
+          APP_URL: ${{ steps.deploy.outputs.app_url }}
+          SP_CLIENT_ID: ${{ steps.deploy.outputs.sp_client_id }}
+        run: |
+          set -euo pipefail
+          {
+            echo 'text<<PREVIEW_COMMENT_EOF'
+            scripts/preview/comment-body.sh "$PR_NUMBER" "$APP_NAME" "$APP_URL" "$SP_CLIENT_ID"
+            echo 'PREVIEW_COMMENT_EOF'
+          } >>"$GITHUB_OUTPUT"
+
+      # Sticky: find the bot's existing comment by its hidden marker and EDIT it. Posting a new
+      # comment per push would bury the PR conversation under near-identical notices — and since
+      # only the newest one is accurate, the older ones become actively misleading.
+      - name: Upsert sticky preview comment
+        uses: actions/github-script@v7
+        env:
+          BODY: ${{ steps.body.outputs.text }}
+        with:
+          script: |
+            const MARKER = '<!-- caltrans-preview-comment -->';
+            const body = `${MARKER}\n${process.env.BODY}`;
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number, per_page: 100,
+            });
+            const existing = comments.find(c => c.body?.includes(MARKER));
+
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+              core.info(`Updated sticky comment ${existing.id}`);
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+              core.info('Created sticky comment');
+            }
+
+      - name: Summary
+        if: always()
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          APP_NAME: ${{ steps.deploy.outputs.app_name }}
+          APP_URL: ${{ steps.deploy.outputs.app_url }}
+          BRANCH_PATH: ${{ steps.deploy.outputs.branch_path }}
+        run: |
+          {
+            echo "### Preview for PR #${PR_NUMBER}"
+            echo
+            echo "- App: ${APP_NAME:-(not deployed)}"
+            echo "- URL: ${APP_URL:-(none)}"
+            echo "- Lakebase branch: \`${BRANCH_PATH:-(none)}\`"
+          } >>"$GITHUB_STEP_SUMMARY"

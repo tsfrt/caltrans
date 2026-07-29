@@ -23,13 +23,70 @@ permissions:
 # NOTE: this is a macOS runner, so no `apt-get`, no GNU coreutils, and
 # /bin/bash is 3.2 (no `mapfile`). Keep steps POSIX/BSD-safe.
 #
-# SECURITY: this workflow triggers on `pull_request`, so a fork PR now executes
-# on the owner's machine rather than a disposable VM. The jobs below are
-# deliberately secret-free, but consider requiring approval for fork PRs
-# (Settings > Actions > "Require approval for all external contributors").
+# ── SECURITY: fork PRs are SKIPPED, not run ───────────────────────────────────
+# This workflow triggers on `pull_request`, and the jobs now run on the owner's
+# PERSONAL PERSISTENT Mac rather than a disposable VM. Without a guard, a fork PR
+# means arbitrary code execution on that machine (any `run:` step, plus anything
+# `npm ci` executes via lifecycle scripts) AND access to whatever the previous run
+# left on disk outside $GITHUB_WORKSPACE — the npm cache, the tool cache, the
+# runner's own credentials. "The jobs are secret-free" was never sufficient
+# mitigation for that; the machine itself is the asset.
+#
+# Every job below therefore carries:
+#
+#   if: >-
+#     github.event_name != 'pull_request' ||
+#     github.event.pull_request.head.repo.full_name == github.repository
+#
+# Why this is correct for BOTH triggers:
+#   * `push` (branches: [main]): `github.event.pull_request` does not exist in a
+#     push payload, and dereferencing a nonexistent property yields an empty
+#     string — it is NOT an error. But the first clause already short-circuits
+#     true (event_name is 'push', not 'pull_request'), so main/push runs are
+#     UNAFFECTED. This is the trap in the obvious one-clause version
+#     (`if: github.event.pull_request.head.repo.full_name == github.repository`):
+#     that compares '' to 'owner/repo' and is FALSE on push, silently disabling CI
+#     on main.
+#   * `pull_request`, same-repo: first clause false, second clause compares
+#     'tsfrt/caltrans' == 'tsfrt/caltrans' -> true. Runs.
+#   * `pull_request`, fork: first clause false, second compares
+#     'someone/caltrans' == 'tsfrt/caltrans' -> false. SKIPPED.
+#
+# Parenthesised at each use site because GitHub does not document the relative
+# precedence of `==` and `||`; not worth depending on.
+#
+# TRADEOFF, stated plainly: fork PRs now show as skipped rather than green, so a
+# fork contribution gets no CI signal and a maintainer must pull the branch
+# locally (or push it to this repo) to test it. On a self-hosted runner attached
+# to a personal machine that is the correct default. `pull_request_target` is NOT
+# the fix here — it would run this repo's workflow with a writable token while
+# checking out fork code, which is strictly worse. If fork CI is ever wanted,
+# route it to a GitHub-hosted runner in a separate workflow rather than loosening
+# this. Consider also Settings > Actions > "Require approval for all external
+# contributors" as defence in depth.
+#
+# ── Concurrency ───────────────────────────────────────────────────────────────
+# This runner takes ONE job at a time and CI fans out into THREE jobs, so a queue
+# of superseded CI runs directly starves preview-down (teardown), whose whole
+# purpose is stopping a paid Lakebase branch from leaking. Collapse redundant PR
+# runs so the queue cannot build up.
+#
+# The group is keyed on `github.ref`, so each PR and each branch serialises
+# independently. cancel-in-progress is deliberately EXPRESSION-driven rather than
+# a flat `true`: superseding an in-flight PR run is desirable (only the newest
+# commit matters), but cancelling a `push`-to-main CI run is not — main is the
+# deploy gate and its result is a record, so pushes queue instead.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   app:
     name: App lint, typecheck, unit tests
+    # Skip fork PRs; never skip push/main. See the SECURITY note above.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: [self-hosted, macOS, ARM64]
     defaults:
       run:
@@ -100,6 +157,10 @@ jobs:
 
   scenario-sql:
     name: Scenario SQL drift check
+    # Skip fork PRs; never skip push/main. See the SECURITY note above.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: [self-hosted, macOS, ARM64]
     steps:
       - name: Check out repository
@@ -119,6 +180,10 @@ jobs:
 
   bundle-validate:
     name: Databricks bundle validate
+    # Skip fork PRs; never skip push/main. See the SECURITY note above.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: [self-hosted, macOS, ARM64]
     steps:
       - name: Check out repository

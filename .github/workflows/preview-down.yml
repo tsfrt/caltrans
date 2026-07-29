@@ -13,10 +13,28 @@ on:
   pull_request:
     types: [closed]
 
-# Serialize against preview-up for the same PR, and do NOT cancel: a half-finished teardown is
-# exactly the leak this workflow exists to prevent.
+# A DISTINCT concurrency group from preview-up, on purpose. The previous comment here claimed
+# this "serializes against preview-up for the same PR, and does NOT cancel" — that was exactly
+# backwards, and the bug it described was the leak this workflow exists to prevent.
+#
+# `cancel-in-progress` is a property of the INCOMING run, not of the run already in flight. Both
+# workflows previously used `group: preview-<n>`, so they contended — and preview-up sets
+# `cancel-in-progress: true`. A `reopened` event (or any push to a reopened PR) starts preview-up,
+# which then CANCELS AN IN-FLIGHT TEARDOWN. Setting `false` here protected nothing: it only meant
+# "this run will not cancel others", never "others may not cancel this run".
+#
+# A cancelled teardown is a Lakebase branch that bills indefinitely and holds one of the
+# project's 10 unarchived slots. So teardown gets its own group name, which no other workflow
+# uses: nothing can preempt it, and `cancel-in-progress: false` below now does what it says,
+# serializing concurrent teardowns of the SAME PR against each other (a close/reopen/close
+# sequence) instead of racing two deletes.
+#
+# The cross-workflow ordering the old comment wanted is not actually needed: teardown.sh is
+# idempotent, asserts the resolved app name and state root are PR-scoped before destroying, and
+# treats "already gone" as success. And the events are mutually exclusive in practice —
+# preview-up runs on opened/synchronize/reopened, preview-down only on closed.
 concurrency:
-  group: preview-${{ github.event.pull_request.number }}
+  group: preview-teardown-${{ github.event.pull_request.number }}
   cancel-in-progress: false
 
 permissions:

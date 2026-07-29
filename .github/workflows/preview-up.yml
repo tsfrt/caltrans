@@ -15,8 +15,15 @@ on:
 
 # Serialize per PR. cancel-in-progress because on a rapid push sequence only the newest commit
 # matters; a superseded deploy racing the new one would leave the preview on an older build.
+#
+# The group name is preview-UP-specific and must STAY distinct from preview-down's. They used to
+# share `preview-<n>`, which meant an incoming preview-up could cancel an in-flight teardown —
+# `cancel-in-progress` is a property of the INCOMING run, so preview-down's `false` did not
+# protect it. `reopened` is the concrete trigger for that: it starts a preview-up while a
+# teardown from the preceding `closed` may still be running, and a cancelled teardown leaks a
+# billing Lakebase branch. See the longer note in preview-down.yml.
 concurrency:
-  group: preview-${{ github.event.pull_request.number }}
+  group: preview-up-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 permissions:

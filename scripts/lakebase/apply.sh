@@ -153,11 +153,43 @@ PSQL_URI="host=${HOST} port=5432 dbname=databricks_postgres user=${PGUSER_VALUE}
 
 case "$MODE" in
   schema)
-    mapfile -t FILES < <(find "$SQL_DIR" -maxdepth 1 -type f \
+    # `while IFS= read -r` rather than the obvious
+    #   mapfile -t FILES < <(find ... | sort)
+    # because `mapfile`/`readarray` is a bash 4 BUILTIN and this script now runs on the
+    # self-hosted macOS runner, where /bin/bash is 3.2.57 (Apple ships the last GPLv2 release
+    # and will not update it). There `mapfile` is a "command not found", which under
+    # `set -euo pipefail` aborts immediately -- and deploy-main.yml calls this in `schema` mode,
+    # so PRODUCTION SCHEMA MIGRATION could not run at all. scripts/preview/lib.sh:97
+    # (read_bundle_vars) already fixed the identical construct for the same reason.
+    #
+    # The find expression and the `| sort` are UNCHANGED and the pipeline still feeds the loop
+    # in the same order, so ordering semantics are identical: 001_ before 002_, and apply.sh
+    # only ever handles 001/002 here (003 grants is a separate mode invoked after
+    # `bundle deploy`). Migration order 001 schema -> deploy -> 003 grants is preserved.
+    #
+    # IFS= and -r keep each path verbatim; the `|| [[ -n "$line" ]]` guard is the standard
+    # handling for a final line with no trailing newline. FILES is reset first so a
+    # re-invocation cannot append to a stale array.
+    #
+    # The body uses `if` rather than `[[ -n "$line" ]] && FILES+=(...)`: as the LAST command in
+    # the loop body, a failing `&&` list is the body's exit status, which `set -e` would treat
+    # as a fatal error on an empty line.
+    FILES=()
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      if [[ -n "$line" ]]; then
+        FILES+=("$line")
+      fi
+    done < <(find "$SQL_DIR" -maxdepth 1 -type f \
       \( -name '001_*.sql' -o -name '002_*.sql' \) | sort)
     if [[ "${#FILES[@]}" -ne 2 ]]; then
       echo "Expected exactly 2 schema SQL files under ${SQL_DIR}, found ${#FILES[@]}" >&2
-      printf '  %s\n' "${FILES[@]}" >&2
+      # `${FILES[@]+...}` because bash 3.2 treats "${FILES[@]}" on an EMPTY array as an unbound
+      # variable under `set -u` (fixed upstream in 4.4). Zero matches is precisely when this
+      # branch runs, so the naive expansion would replace this diagnostic with a bare
+      # "FILES[@]: unbound variable".
+      if [[ "${#FILES[@]}" -gt 0 ]]; then
+        printf '  %s\n' ${FILES[@]+"${FILES[@]}"} >&2
+      fi
       exit 1
     fi
     PSQL_ARGS=(--single-transaction -v ON_ERROR_STOP=1)

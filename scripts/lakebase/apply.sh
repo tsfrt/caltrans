@@ -56,33 +56,52 @@ SP_ROLE="${LAKEBASE_SP_ROLE:-4a27f46d-04b9-4580-9767-44b505a4cf50}"
 TTL="${LAKEBASE_CREDENTIAL_TTL:-1200s}"
 SQL_DIR="${LAKEBASE_SQL_DIR:-lakebase}"
 
+# Guard every value-taking option. Without this, `--sp-role` with no value expanded `$2`
+# under `set -u` and died with a bare `line NN: $2: unbound variable` instead of the usage
+# path -- unreadable in a CI log. Also rejects a following flag (`--sp-role --ttl 60s`),
+# which would otherwise silently consume the next option as the value.
+require_value() {
+  if [[ $# -lt 2 || -z "$2" || "$2" == -* ]]; then
+    echo "Option $1 requires a value" >&2
+    usage >&2
+    exit 2
+  fi
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --project)
+      require_value "$@"
       PROJECT="$2"
       shift 2
       ;;
     --branch)
+      require_value "$@"
       BRANCH="$2"
       shift 2
       ;;
     --endpoint)
+      require_value "$@"
       ENDPOINT="$2"
       shift 2
       ;;
     --pg-user)
+      require_value "$@"
       PGUSER_VALUE="$2"
       shift 2
       ;;
     --sp-role)
+      require_value "$@"
       SP_ROLE="$2"
       shift 2
       ;;
     --ttl)
+      require_value "$@"
       TTL="$2"
       shift 2
       ;;
     --sql-dir)
+      require_value "$@"
       SQL_DIR="$2"
       shift 2
       ;;
@@ -164,17 +183,42 @@ case "$MODE" in
     # unauthenticated request and a PAT bearer token, so CI cannot read that route.
     # has_table_privilege() against the SP role is the exact check the health route
     # performs for "canWriteSessions".
-    can_write="$(printf "%s\n" \
-      "SELECT has_table_privilege(:'sp_role', 'app.advisor_sessions', 'INSERT');" \
-      | PGPASSWORD="$TOKEN" psql "$PSQL_URI" \
-          -X -qtA -v ON_ERROR_STOP=1 -v sp_role="$SP_ROLE" -f - \
-      | tr -d '[:space:]')"
+    #
+    # The query is fed on stdin via `-f -` rather than `-c` because `psql -c` does not
+    # perform `:'sp_role'` variable interpolation -- it sends the string to the server
+    # verbatim, which fails with `syntax error at or near ":"`.
+    psql_stderr="$(mktemp)"
+    trap 'rm -f "$psql_stderr"' EXIT
+
+    # `set -e` must NOT fire on a psql failure here. The most likely real-world failure is
+    # `role "<uuid>" does not exist` -- the app bundle was never deployed, so Databricks
+    # never provisioned the SP's Postgres role. Under `set -euo pipefail` that made psql's
+    # bare exit 3 kill the script before the diagnostic below could run, so an operator saw
+    # a raw psql error that reads like transient CI flake instead of "production grants are
+    # broken". `if ! var=$(...)` suspends errexit for just this substitution; the rest of
+    # the script keeps `set -euo pipefail`.
+    if ! can_write_raw="$(printf "%s\n" \
+          "SELECT has_table_privilege(:'sp_role', 'app.advisor_sessions', 'INSERT');" \
+          | PGPASSWORD="$TOKEN" psql "$PSQL_URI" \
+              -X -qtA -v ON_ERROR_STOP=1 -v sp_role="$SP_ROLE" -f - 2>"$psql_stderr")"; then
+      echo "::error::canWriteSessions could not be determined for ${SP_ROLE} -- the" \
+           "privilege query itself failed." >&2
+      echo "If psql reports 'role \"${SP_ROLE}\" does not exist', the app service" >&2
+      echo "principal has no Postgres role yet: 'databricks bundle deploy' must run" >&2
+      echo "(and provision the role) BEFORE 'apply.sh grants' and this check." >&2
+      echo "psql said:" >&2
+      sed 's/^/  /' "$psql_stderr" >&2
+      exit 1
+    fi
+
+    can_write="$(printf '%s' "$can_write_raw" | tr -d '[:space:]')"
     if [[ "$can_write" == "t" ]]; then
       echo "canWriteSessions=true for ${SP_ROLE} (app.advisor_sessions INSERT granted)"
     else
-      echo "canWriteSessions=false for ${SP_ROLE}: the app service principal cannot" >&2
-      echo "INSERT into app.advisor_sessions. Re-check that 'apply.sh grants' ran AFTER" >&2
-      echo "'databricks bundle deploy'. psql returned: '${can_write}'" >&2
+      echo "::error::canWriteSessions is false for ${SP_ROLE} -- grants did not apply." >&2
+      echo "The app service principal cannot INSERT into app.advisor_sessions." >&2
+      echo "Re-check that 'apply.sh grants' ran AFTER 'databricks bundle deploy'." >&2
+      echo "psql returned: '${can_write}'" >&2
       exit 1
     fi
     ;;

@@ -118,3 +118,41 @@ scenario SQL is in sync with the generator
    to pull `ca-certificates`). So the fix provisioned Python from scratch on a real box with no
    human action and no sudo — which is precisely the Option C claim, now demonstrated rather than
    argued. Homebrew resolved 3.12.13 (drift from setup-python's 3.12.10 — harmless, per Item 3).
+
+---
+
+## Item 7 — runner prerequisites (also committed to docs/PREVIEW_ENVIRONMENTS.md)
+
+While writing this I found `preview-up.yml:215` emits
+`::error::See docs/PREVIEW_ENVIRONMENTS.md (runner prerequisites)` — but **no such section
+existed**. The actionable error pointed at nothing. Added it (commit 3e4e55f), because "a missing
+binary fails the same silent way the missing psql did" is exactly what that error is for.
+
+### A human must install EXACTLY TWO things
+1. **Homebrew** — as the runner user, NOT with sudo.
+2. **Xcode Command Line Tools** (`xcode-select --install`) — provides `git`; Homebrew needs it too.
+
+### Provisioned automatically by guarded idempotent steps (no human action)
+| binary | formula | why it needs a PATH export |
+|---|---|---|
+| `psql` | `libpq` | keg-only -> brew links nothing; workflow exports `$(brew --prefix)/opt/libpq/bin` |
+| `jq` | `jq` | NOT keg-only -> no export needed |
+| `python3` | `python@3.12` | **altinstall** -> exports `$(brew --prefix python@3.12)/libexec/bin` |
+
+Each has an install step AND a separate assert step that proves the binary resolves, so a missing
+one fails loudly with the exact `brew install` to run rather than as a bare exit 127 mid-deploy.
+
+### From the actions, no runner setup
+- `node`/`npm`/`npx` — `actions/setup-node@v4` (into the runner's own `_work/_tool`; NO `cache: npm`)
+- `databricks` — `databricks/setup-cli@v1.7.0` (exact pin; installs under `$RUNNER_TEMP`, no sudo)
+- `git`/`curl`/`unzip`/`tar` — stock macOS
+
+### NOT requirements
+- **`gh`** — verified zero invocations across `.github/` and `scripts/`. PR comments use
+  `actions/github-script`, which runs in the action runtime, not on the runner's PATH.
+- **`actions/setup-python`** — must NOT be reintroduced (check 3i in verify-all.sh enforces this).
+- **`sudo`** — no workflow step uses it (asserted structurally by check 3i).
+
+### Secrets (unchanged by this PR)
+`DATABRICKS_HOST`, `DATABRICKS_TOKEN` (PAT for thomas.seufert@databricks.com; identity is
+load-bearing for the bundle state root and schema ownership). Environment `preview` must exist.

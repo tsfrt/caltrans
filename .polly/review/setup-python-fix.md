@@ -156,3 +156,48 @@ one fails loudly with the exact `brew install` to run rather than as a bare exit
 ### Secrets (unchanged by this PR)
 `DATABRICKS_HOST`, `DATABRICKS_TOKEN` (PAT for thomas.seufert@databricks.com; identity is
 load-bearing for the bundle state root and schema ownership). Environment `preview` must exist.
+
+---
+
+## Item 8 — final verification summary
+
+`bash .polly/review/verify-all.sh` -> **ALL CHECKS PASSED, exit 0**. Full list:
+1 YAML parse (6 files, now globbing actions/*) | 2 bash -n (10 scripts) | 2b bash -n (32 embedded
+run: blocks) | 3a zero cache: inputs | 3b no mapfile | 3c no hardcoded brew prefix | 3d 6/6 jobs on
+[self-hosted, macOS, ARM64] | 3e no ubuntu-latest runs-on | 3f no real apt-get | 3g no -pooler uses |
+3h setup-cli pinned v1.7.0 | **3i (NEW) zero setup-python uses, zero bare python, zero sudo, all 3
+sites on the shared action** | 4 jq guards | 5 fork-guard | 6 distinct concurrency groups |
+7 no bash-4-only constructs.
+
+Both regressions were NEGATIVE-TESTED (the check has teeth, it is not decoration):
+- reintroduce bare `python` in ci.yml -> `FAIL ... bare python in step 'Check rendered scenario SQL'`, exit 1
+- reintroduce `actions/setup-python` in deploy-main.yml -> `FAIL ... still USES actions/setup-python`, exit 1
+Tree restored to clean after each; gate re-confirmed exit 0.
+
+Preserved invariants re-verified (all hold):
+- (a) `lib.sh:78` emits all three `--var` pairs in ONE printf — unchanged, not touched.
+- (b) app bundle: `preview.workspace.root_path` = `.../preview/${var.app_name}`; `default` has
+  **no** root_path key (asserted programmatically, not eyeballed).
+- (c) `bundle destroy` is `-t "$PREVIEW_BUNDLE_TARGET"` scoped; BOTH `apps delete` calls pass
+  `"$APP_NAME"` (teardown.sh:77, teardown.sh:85).
+- `setup-node` NOT touched; `cache: npm` NOT reintroduced; setup-cli still exactly v1.7.0.
+
+## Item 9 — UNVERIFIED, stated plainly
+
+1. **`deploy-main.yml`'s `Ensure Python` step has not been observed running.** It only triggers on
+   push to `main`, and this is a PR. It is verified *by construction* — it invokes the same
+   composite action that just went green in ci.yml on the same runner — but that is inference, not
+   observation. This is the highest-value remaining check, since it gates the production
+   schema/grants migrations.
+2. **`preview-up.yml`'s `Ensure Python` step has not been observed running.** preview-up triggers
+   on every PR (opened/synchronize/reopened — NOT label-gated, contrary to my initial reading), but
+   its runs were cancelled by `cancel-in-progress` concurrency as I pushed follow-up commits, and
+   then the runner went offline.
+3. **The `caltrans` runner went `offline` (busy=false) partway through this session**, so runs
+   queued at 3e4e55f/7b05ce0 are stuck queued rather than failing. Those commits changed only docs
+   and the verification gate — **no workflow logic changed after 4317198**, the commit the green
+   result was measured on. A re-run once the box is back would close items 1 and 2.
+4. `Databricks bundle validate` was still in_progress when its run got superseded; it has no Python
+   involvement, and it was green on `main` before this change.
+5. I did not run any mutating Databricks command, per the constraints — so nothing about actual
+   Lakebase migration behaviour is verified here beyond the fact that the step is now reachable.

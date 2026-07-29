@@ -2,6 +2,11 @@ bundle:
   name: caltrans-whatif
 
 variables:
+  app_name:
+    description: >-
+      Databricks App resource name. Per-PR previews override this with
+      `caltrans-whatif-pr-<N>`. Must be <=26 chars, lowercase alphanumeric + hyphens.
+    default: caltrans-whatif
   sql_warehouse_id:
     description: SQL Warehouse ID
   serving_endpoint_name:
@@ -16,7 +21,7 @@ variables:
 resources:
   apps:
     app:
-      name: "caltrans-whatif"
+      name: ${var.app_name}
       description: "California traffic what-if modeling: animated geospatial map over DBSQL + AI congestion advisor"
       source_code_path: ./
       # Uncomment to enable on behalf of user API scopes. Available scopes: sql, dashboards.genie, files.files, serving.serving-endpoints
@@ -63,3 +68,31 @@ targets:
       serving_endpoint_name: databricks-claude-sonnet-5
       lakebase_branch: projects/caltrans-app/branches/production
       lakebase_database: projects/caltrans-app/branches/production/databases/databricks-postgres
+
+  # Per-PR preview target. Exists ONLY so each preview gets its own bundle STATE, not just
+  # its own app name: one bundle+target maps to one deployment state root, so deploying the
+  # `default` target with `--var app_name=` alone would make DAB treat the previously-named
+  # app as removed-from-config and DESTROY it. Interpolating ${var.app_name} into
+  # workspace.root_path gives PR N a state root no other PR (and not production) shares.
+  #
+  # `default`'s root_path is deliberately left implicit so production keeps resolving to
+  # .bundle/caltrans-whatif/default exactly as it does today — do not add app_name there.
+  #
+  # CI always passes all three per-PR overrides together; see scripts/preview/lib.sh.
+  preview:
+    workspace:
+      host: https://fevm-serverless-stable-blj52t.cloud.databricks.com
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/preview/${var.app_name}
+
+    variables:
+      # Previews share production's warehouse and serving endpoint: the app only ever
+      # reads UC (all `lanl.caltrans_traffic` references are FROM clauses), so there is
+      # nothing for a preview to corrupt.
+      sql_warehouse_id: 688f49c732cf9083
+      serving_endpoint_name: databricks-claude-sonnet-5
+      # Placeholders. CI MUST override all three per PR. Both lakebase_* vars must move
+      # together: lakebase_database is a full path that embeds the branch id, so overriding
+      # lakebase_branch alone leaves the preview app wired to PRODUCTION data.
+      app_name: caltrans-whatif-pr-0
+      lakebase_branch: projects/caltrans-app/branches/pr-0
+      lakebase_database: projects/caltrans-app/branches/pr-0/databases/databricks-postgres

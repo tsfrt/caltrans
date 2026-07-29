@@ -123,7 +123,7 @@ export async function probeSseThroughProxy(selfUrl: string): Promise<SseProbeRes
     };
   }
 
-  const reader = res.body.getReader();
+  const reader: ReadableStreamDefaultReader<Uint8Array> = res.body.getReader();
   let chunks = 0;
   let firstChunkMs: number | null = null;
   let lastChunkMs: number | null = null;

@@ -1,5 +1,5 @@
 import { createBrowserRouter, RouterProvider } from 'react-router';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { ArchitecturePage } from './pages/architecture/ArchitecturePage';
 import { TrafficMapPage } from './pages/map/TrafficMapPage';
 
@@ -57,8 +57,8 @@ export function Layout() {
   );
 }
 
-const router = createBrowserRouter([{ path: '*', element: <Layout /> }]);
-
 export default function App() {
+  const router = useMemo(() => createBrowserRouter([{ path: '*', element: <Layout /> }]), []);
+
   return <RouterProvider router={router} />;
 }

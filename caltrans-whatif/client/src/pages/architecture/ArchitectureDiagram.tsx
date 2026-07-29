@@ -1,7 +1,13 @@
 import type { TopologyEdge, TopologyFlowId, TopologyLayer, TopologyNode } from './topology';
 import { topologyEdges, topologyNodes } from './topology';
 
-const layerOrder: TopologyLayer[] = ['ingest', 'storage+governance', 'compute', 'serving+AI', 'app'];
+export const layerOrder: TopologyLayer[] = [
+  'ingest',
+  'storage+governance',
+  'compute',
+  'serving+AI',
+  'app',
+];
 
 const layerLabels: Record<TopologyLayer, string> = {
   ingest: 'Ingest',
@@ -26,21 +32,46 @@ const flowStyles: Record<TopologyFlowId, { color: string; duration: string }> = 
   'startup-sse-probe': { color: '#22c55e', duration: '4.2s' },
 };
 
-type PositionedNode = TopologyNode & {
+export type PositionedNode = TopologyNode & {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  row: number;
+};
+
+export type RenderedLayer = {
+  layer: TopologyLayer;
+  nodes: TopologyNode[];
   x: number;
   y: number;
   width: number;
   height: number;
 };
 
-const width = 1180;
-const height = 680;
-const nodeWidth = 190;
-const nodeHeight = 82;
-const layerTop = 96;
-const layerGap = 124;
-const laneLeft = 54;
-const laneWidth = 1072;
+export type ArchitectureLayout = {
+  width: number;
+  height: number;
+  positioned: Map<string, PositionedNode>;
+  renderedLayers: RenderedLayer[];
+};
+
+export const architectureLayoutConfig = {
+  width: 1180,
+  nodeWidth: 248,
+  nodeHeight: 92,
+  minHorizontalGutter: 24,
+  topPadding: 96,
+  bottomPadding: 48,
+  laneLeft: 54,
+  laneWidth: 1072,
+  layerX: 28,
+  layerWidth: 1124,
+  layerTopPadding: 48,
+  layerBottomPadding: 24,
+  rowGap: 24,
+  layerGap: 30,
+} as const;
 
 function wrapLabel(label: string) {
   const words = label.split(' ');
@@ -64,36 +95,103 @@ function wrapLabel(label: string) {
   return lines.slice(0, 3);
 }
 
-function buildLayout(nodes: TopologyNode[]) {
+export function getRenderedLayers(nodes: TopologyNode[]) {
   const byLayer = new Map<TopologyLayer, TopologyNode[]>(layerOrder.map((layer) => [layer, []]));
   for (const node of nodes) {
     byLayer.get(node.layer)?.push(node);
   }
 
+  return layerOrder
+    .map((layer) => ({ layer, nodes: byLayer.get(layer) ?? [] }))
+    .filter((renderedLayer) => renderedLayer.nodes.length > 0);
+}
+
+function nodesPerRow(nodeCount: number) {
+  const { laneWidth, minHorizontalGutter, nodeWidth } = architectureLayoutConfig;
+  const maxPerRow = Math.max(1, Math.floor((laneWidth + minHorizontalGutter) / (nodeWidth + minHorizontalGutter)));
+
+  return Math.min(nodeCount, maxPerRow);
+}
+
+export function buildLayout(nodes: TopologyNode[]): ArchitectureLayout {
+  const renderedLayers = getRenderedLayers(nodes);
+  const {
+    bottomPadding,
+    laneLeft,
+    laneWidth,
+    layerBottomPadding,
+    layerGap,
+    layerTopPadding,
+    layerWidth,
+    layerX,
+    minHorizontalGutter,
+    nodeHeight,
+    nodeWidth,
+    rowGap,
+    topPadding,
+    width,
+  } = architectureLayoutConfig;
+
   const positioned = new Map<string, PositionedNode>();
-  layerOrder.forEach((layer, layerIndex) => {
-    const layerNodes = byLayer.get(layer) ?? [];
-    const spacing = laneWidth / (layerNodes.length + 1);
+  const layoutLayers: RenderedLayer[] = [];
+  let currentY = topPadding;
+
+  for (const { layer, nodes: layerNodes } of renderedLayers) {
+    const perRow = nodesPerRow(layerNodes.length);
+    const rowCount = Math.ceil(layerNodes.length / perRow);
+    const layerHeight = layerTopPadding + rowCount * nodeHeight + (rowCount - 1) * rowGap + layerBottomPadding;
+    layoutLayers.push({ layer, nodes: layerNodes, x: layerX, y: currentY, width: layerWidth, height: layerHeight });
+
     layerNodes.forEach((node, nodeIndex) => {
+      const row = Math.floor(nodeIndex / perRow);
+      const rowStart = row * perRow;
+      const rowNodes = layerNodes.slice(rowStart, rowStart + perRow);
+      const indexInRow = nodeIndex - rowStart;
+      const availableGutter = (laneWidth - rowNodes.length * nodeWidth) / Math.max(1, rowNodes.length + 1);
+      const gutter = Math.max(minHorizontalGutter, availableGutter);
+      const rowContentWidth = rowNodes.length * nodeWidth + (rowNodes.length - 1) * gutter;
+      const rowLeft = laneLeft + (laneWidth - rowContentWidth) / 2;
+
       positioned.set(node.id, {
         ...node,
-        x: laneLeft + spacing * (nodeIndex + 1) - nodeWidth / 2,
-        y: layerTop + layerGap * layerIndex,
+        x: rowLeft + indexInRow * (nodeWidth + gutter),
+        y: currentY + layerTopPadding + row * (nodeHeight + rowGap),
         width: nodeWidth,
         height: nodeHeight,
+        row,
       });
     });
-  });
 
-  return positioned;
+    currentY += layerHeight + layerGap;
+  }
+
+  return {
+    width,
+    height: currentY - layerGap + bottomPadding,
+    positioned,
+    renderedLayers: layoutLayers,
+  };
 }
 
 function edgePath(from: PositionedNode, to: PositionedNode, edgeIndex: number) {
+  const bow = (edgeIndex % 3) * 20 - 20;
+
+  if (from.y === to.y) {
+    const fromCenterX = from.x + from.width / 2;
+    const toCenterX = to.x + to.width / 2;
+    const direction = fromCenterX < toCenterX ? 1 : -1;
+    const startX = from.x + (direction > 0 ? from.width : 0);
+    const endX = to.x + (direction > 0 ? 0 : to.width);
+    const centerY = from.y + from.height / 2;
+    const controlY = from.y - 34 - Math.abs(bow) / 2;
+
+    return `M ${startX} ${centerY} C ${startX + direction * 64} ${controlY}, ${endX - direction * 64} ${controlY}, ${endX} ${centerY}`;
+  }
+
   const startX = from.x + from.width / 2;
-  const startY = from.y + from.height / 2;
+  const startY = from.y + (from.y < to.y ? from.height : 0);
   const endX = to.x + to.width / 2;
-  const endY = to.y + to.height / 2;
-  const bow = (edgeIndex % 3) * 18 - 18;
+  const endY = to.y + (from.y < to.y ? 0 : to.height);
   const midY = (startY + endY) / 2 + bow;
 
   return `M ${startX} ${startY} C ${startX} ${midY}, ${endX} ${midY}, ${endX} ${endY}`;
@@ -105,7 +203,8 @@ type ArchitectureDiagramProps = {
 };
 
 export function ArchitectureDiagram({ selectedNodeId, onSelectNode }: ArchitectureDiagramProps) {
-  const positions = buildLayout(topologyNodes);
+  const layout = buildLayout(topologyNodes);
+  const positions = layout.positioned;
 
   return (
     <div className="overflow-hidden rounded-2xl border bg-slate-950 text-white shadow-2xl shadow-slate-950/30">
@@ -113,7 +212,7 @@ export function ArchitectureDiagram({ selectedNodeId, onSelectNode }: Architectu
         role="img"
         aria-label="California Traffic What-If architecture topology with animated request flows"
         className="h-auto w-full"
-        viewBox={`0 0 ${width} ${height}`}
+        viewBox={`0 0 ${layout.width} ${layout.height}`}
       >
         <defs>
           <filter id="architecture-glow" x="-40%" y="-40%" width="180%" height="180%">
@@ -151,20 +250,19 @@ export function ArchitectureDiagram({ selectedNodeId, onSelectNode }: Architectu
           `}</style>
         </defs>
 
-        <rect width={width} height={height} fill="url(#architecture-backdrop)" />
+        <rect width={layout.width} height={layout.height} fill="url(#architecture-backdrop)" />
         <circle cx="1040" cy="88" r="190" fill="#1d4ed8" opacity="0.12" />
-        <circle cx="132" cy="590" r="210" fill="#7c3aed" opacity="0.12" />
+        <circle cx="132" cy={layout.height - 90} r="210" fill="#7c3aed" opacity="0.12" />
 
-        {layerOrder.map((layer, index) => {
+        {layout.renderedLayers.map(({ height, layer, width, x, y }) => {
           const style = layerStyles[layer];
-          const y = layerTop + layerGap * index - 20;
           return (
             <g key={layer}>
               <rect
-                x="28"
+                x={x}
                 y={y}
-                width="1124"
-                height="108"
+                width={width}
+                height={height}
                 rx="24"
                 fill={style.fill}
                 opacity="0.34"
@@ -214,6 +312,7 @@ export function ArchitectureDiagram({ selectedNodeId, onSelectNode }: Architectu
           const style = layerStyles[node.layer];
           const isSelected = selectedNodeId === node.id;
           const labelLines = wrapLabel(node.label);
+          const labelStartY = 42 - (labelLines.length - 1) * 8;
           return (
             <g key={node.id} transform={`translate(${node.x} ${node.y})`}>
               <rect
@@ -225,15 +324,15 @@ export function ArchitectureDiagram({ selectedNodeId, onSelectNode }: Architectu
                 strokeWidth={isSelected ? 4 : 2}
                 filter={isSelected ? 'url(#architecture-glow)' : undefined}
               />
-              <rect x="12" y="12" width="10" height="58" rx="5" fill={style.accent} />
-              <text x="32" y="29" fill="#ffffff" fontSize="14" fontWeight="800">
+              <rect x="12" y="12" width="10" height="68" rx="5" fill={style.accent} />
+              <text x="34" y={labelStartY} fill="#ffffff" fontSize="14" fontWeight="800">
                 {labelLines.map((line, lineIndex) => (
-                  <tspan key={line} x="32" dy={lineIndex === 0 ? 0 : 16}>
+                  <tspan key={line} x="34" dy={lineIndex === 0 ? 0 : 16}>
                     {line}
                   </tspan>
                 ))}
               </text>
-              <text x="32" y="68" fill="#cbd5e1" fontSize="11" fontWeight="600">
+              <text x="34" y="76" fill="#cbd5e1" fontSize="11" fontWeight="600">
                 {node.vendorService}
               </text>
               <foreignObject x="0" y="0" width={node.width} height={node.height}>

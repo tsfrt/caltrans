@@ -9,15 +9,17 @@ Usage:
   scripts/lakebase/apply.sh verify [options]
 
 Applies Lakebase SQL with the confirmed direct-host + generated OAuth credential
-recipe. The schema mode applies 001_schema.sql and 002_schema_advisor.sql in one
-transaction. The grants mode applies 003_grants_advisor.sql after the app bundle
+recipe. The schema mode applies every NNN_*.sql except the grants files, in
+numeric order, in one transaction -- so a newly added migration is picked up
+automatically. The grants mode applies 003_grants_advisor.sql after the app bundle
 has been deployed, because that deploy provisions the app service principal's
 Postgres role. The verify mode asserts the app service principal can INSERT into
 app.advisor_sessions -- the same privilege GET /api/advisor/health reports as
 "canWriteSessions" -- and exits non-zero if it cannot.
 
 Modes:
-  schema    Apply 001_schema.sql + 002_schema_advisor.sql (--single-transaction).
+  schema    Apply every NNN_*.sql except *_grants_*, in numeric order
+            (--single-transaction).
   grants    Apply 003_grants_advisor.sql, passing -v sp_role=<--sp-role>.
   verify    Assert has_table_privilege(<sp_role>, 'app.advisor_sessions', 'INSERT').
 
@@ -153,45 +155,52 @@ PSQL_URI="host=${HOST} port=5432 dbname=databricks_postgres user=${PGUSER_VALUE}
 
 case "$MODE" in
   schema)
-    # `while IFS= read -r` rather than the obvious
-    #   mapfile -t FILES < <(find ... | sort)
-    # because `mapfile`/`readarray` is a bash 4 BUILTIN and this script now runs on the
-    # self-hosted macOS runner, where /bin/bash is 3.2.57 (Apple ships the last GPLv2 release
-    # and will not update it). There `mapfile` is a "command not found", which under
-    # `set -euo pipefail` aborts immediately -- and deploy-main.yml calls this in `schema` mode,
-    # so PRODUCTION SCHEMA MIGRATION could not run at all. scripts/preview/lib.sh:97
-    # (read_bundle_vars) already fixed the identical construct for the same reason.
+    # ── WHICH FILES ──────────────────────────────────────────────────────────────────
+    # Every NNN_*.sql except the grants files, which run separately as the schema owner
+    # with -v sp_role (see the `grants` mode below).
     #
-    # The find expression and the `| sort` are UNCHANGED and the pipeline still feeds the loop
-    # in the same order, so ordering semantics are identical: 001_ before 002_, and apply.sh
-    # only ever handles 001/002 here (003 grants is a separate mode invoked after
-    # `bundle deploy`). Migration order 001 schema -> deploy -> 003 grants is preserved.
+    # Deliberately a glob rather than an enumerated list: this used to match only 001_* and
+    # 002_* and assert a count of exactly 2, which meant adding a migration silently SKIPPED
+    # it here -- the app then deployed against a database missing the new columns and failed
+    # at runtime, in the deployed app only. That is the same failure class
+    # 003_grants_advisor.sql was written to document. A glob cannot fall behind the directory.
+    #
+    # `sort` orders by the numeric prefix, so migrations still apply in sequence (001 before
+    # 002 before 004), and psql's --single-transaction below makes the batch atomic. The
+    # deployment order `schema -> bundle deploy -> grants` is unchanged: grants is a separate
+    # mode, and `-not -name '*_grants_*'` is what keeps it out of this batch.
+    #
+    # ── WHY NOT mapfile ──────────────────────────────────────────────────────────────
+    # `mapfile`/`readarray` is a bash 4 BUILTIN and this script runs on the self-hosted macOS
+    # runner, where /bin/bash is 3.2.57 (Apple ships the last GPLv2 release and will not
+    # update it). There `mapfile` is a "command not found", which under `set -euo pipefail`
+    # aborts immediately -- and deploy-main.yml calls this in `schema` mode, so PRODUCTION
+    # SCHEMA MIGRATION could not run at all. scripts/preview/lib.sh:97 (read_bundle_vars)
+    # fixed the identical construct for the same reason.
     #
     # IFS= and -r keep each path verbatim; the `|| [[ -n "$line" ]]` guard is the standard
     # handling for a final line with no trailing newline. FILES is reset first so a
     # re-invocation cannot append to a stale array.
     #
-    # The body uses `if` rather than `[[ -n "$line" ]] && FILES+=(...)`: as the LAST command in
-    # the loop body, a failing `&&` list is the body's exit status, which `set -e` would treat
-    # as a fatal error on an empty line.
+    # The body uses `if` rather than `[[ -n "$line" ]] && FILES+=(...)`: as the LAST command
+    # in the loop body, a failing `&&` list is the body's exit status, which `set -e` would
+    # treat as a fatal error on an empty line.
     FILES=()
     while IFS= read -r line || [[ -n "$line" ]]; do
       if [[ -n "$line" ]]; then
         FILES+=("$line")
       fi
     done < <(find "$SQL_DIR" -maxdepth 1 -type f \
-      \( -name '001_*.sql' -o -name '002_*.sql' \) | sort)
-    if [[ "${#FILES[@]}" -ne 2 ]]; then
-      echo "Expected exactly 2 schema SQL files under ${SQL_DIR}, found ${#FILES[@]}" >&2
-      # `${FILES[@]+...}` because bash 3.2 treats "${FILES[@]}" on an EMPTY array as an unbound
-      # variable under `set -u` (fixed upstream in 4.4). Zero matches is precisely when this
-      # branch runs, so the naive expansion would replace this diagnostic with a bare
-      # "FILES[@]: unbound variable".
-      if [[ "${#FILES[@]}" -gt 0 ]]; then
-        printf '  %s\n' ${FILES[@]+"${FILES[@]}"} >&2
-      fi
+      -name '[0-9][0-9][0-9]_*.sql' -not -name '*_grants_*' | sort)
+    if [[ "${#FILES[@]}" -eq 0 ]]; then
+      # No file list to print here: bash 3.2 treats "${FILES[@]}" on an EMPTY array as an
+      # unbound variable under `set -u` (fixed upstream in 4.4), and zero matches is exactly
+      # when this branch runs.
+      echo "No NNN_*.sql schema files found under ${SQL_DIR}" >&2
       exit 1
     fi
+    echo "Applying ${#FILES[@]} schema migration(s):" >&2
+    printf '  %s\n' "${FILES[@]}" >&2
     PSQL_ARGS=(--single-transaction -v ON_ERROR_STOP=1)
     for file in "${FILES[@]}"; do
       PSQL_ARGS+=(-f "$file")

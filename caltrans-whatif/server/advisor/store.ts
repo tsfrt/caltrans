@@ -65,6 +65,13 @@ export interface MessageRow extends QueryResultRowLike {
   transport: string | null;
   recommendations: unknown;
   created_at: string;
+  /**
+   * Human review of this turn. `reviewed_at IS NOT NULL` is the flag; `reviewed_by` records
+   * who set it. See lakebase/004_schema_advisor_review.sql for why it is two nullable columns
+   * rather than a boolean, and why it lives on the message rather than the recommendation.
+   */
+  reviewed_at: string | null;
+  reviewed_by: string | null;
 }
 
 export interface RecommendationRow extends QueryResultRowLike {
@@ -216,7 +223,8 @@ export async function getSession(
 
 const MESSAGE_COLUMNS = `
   id, session_id, role, content, model_endpoint, prompt_tokens, completion_tokens,
-  latency_ms, finish_reason, transport, recommendations, created_at`;
+  latency_ms, finish_reason, transport, recommendations, created_at,
+  reviewed_at, reviewed_by`;
 
 /**
  * Full transcript for replay.
@@ -273,6 +281,37 @@ export async function appendMessage(
     ],
   );
   return rows[0];
+}
+
+/**
+ * Set or clear the human-review flag on one assistant turn.
+ *
+ * `session_id` is part of the PREDICATE rather than checked after the fetch — the same tenancy
+ * idiom as `getSession` above — so a message id belonging to another session is
+ * indistinguishable from one that does not exist. The caller establishes that the session
+ * belongs to the current user before calling this.
+ *
+ * `role = 'assistant'` is in the predicate too: user turns and the stored snapshot brief are
+ * not assessments and have nothing to review. A mismatch returns null (the route reports it)
+ * rather than updating a row that should not be reviewable.
+ *
+ * Clearing sets BOTH columns back to NULL, so an un-reviewed row is indistinguishable from one
+ * never reviewed. Keeping a stale `reviewed_by` next to a null `reviewed_at` would leave a
+ * half-state that reads as "reviewed by X, at no time".
+ */
+export async function setMessageReviewed(
+  db: Db,
+  input: { sessionId: string; messageId: string; reviewedBy: string; reviewed: boolean },
+): Promise<MessageRow | null> {
+  const { rows } = await db.query<MessageRow>(
+    `UPDATE app.advisor_messages
+        SET reviewed_at = CASE WHEN $1::boolean THEN now() ELSE NULL END,
+            reviewed_by = CASE WHEN $1::boolean THEN $2::text ELSE NULL END
+      WHERE id = $3 AND session_id = $4 AND role = 'assistant'
+      RETURNING ${MESSAGE_COLUMNS}`,
+    [input.reviewed, input.reviewedBy, input.messageId, input.sessionId],
+  );
+  return rows.length > 0 ? rows[0] : null;
 }
 
 /** Bump the session's updated_at so the session list orders by real activity. */

@@ -8,6 +8,7 @@
  *   GET    /api/advisor/sessions/:id           — session + transcript + recommendations
  *   DELETE /api/advisor/sessions/:id           — delete (messages/recs cascade)
  *   POST   /api/advisor/sessions/:id/messages  — send a turn; streams SSE, persists on completion
+ *   POST   .../messages/:messageId/review      — set/clear the human-reviewed flag on a turn
  *   GET    /api/advisor/diag/sse               — SSE-through-proxy probe (see below)
  *
  * ── THE STREAMING CONTRACT ────────────────────────────────────────────────────────────
@@ -56,6 +57,7 @@ import {
   listMessages,
   listRecommendations,
   listSessions,
+  setMessageReviewed,
   touchSession,
   type Db,
 } from './store.js';
@@ -98,6 +100,11 @@ const CreateSessionBody = z.object({
   bucket: z.number().int().min(0).max(BUCKETS_PER_DAY - 1),
   corridor: z.string().min(1).max(64).default(ALL_CORRIDORS),
   title: z.string().min(1).max(200).optional(),
+});
+
+const ReviewMessageBody = z.object({
+  /** Binary: true marks the turn reviewed, false clears it. */
+  reviewed: z.boolean(),
 });
 
 const SendMessageBody = z.object({
@@ -350,6 +357,63 @@ export function registerAdvisorRoutes(app: Application, deps: AdvisorDeps): void
       res.status(204).send();
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : 'Failed to delete' });
+    }
+  });
+
+  /**
+   * ── mark a turn reviewed ──────────────────────────────────────────────────────────
+   * A binary human-review flag on one assistant turn. Not part of the M2 recommendation
+   * lifecycle (`advisor_recommendations.scenario_id`) — it records that a person read the
+   * assessment, which is meaningful even for a turn that correctly recommended nothing and so
+   * produced no recommendation rows at all.
+   *
+   * Ownership is established by loading the SESSION as the current user first, exactly as the
+   * delete route does. Without that, a message id alone would be enough to flag a turn in
+   * someone else's session.
+   */
+  app.post('/api/advisor/sessions/:id/messages/:messageId/review', async (req: Request, res: Response) => {
+    const parsed = ReviewMessageBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Invalid request', detail: parsed.error.issues });
+      return;
+    }
+    const user = currentUser(req);
+    const sessionId = param(req, 'id');
+    const messageId = param(req, 'messageId');
+
+    try {
+      const session = await getSession(db, sessionId, user);
+      if (!session) {
+        res.status(404).json({ error: 'Session not found' });
+        return;
+      }
+
+      const message = await setMessageReviewed(db, {
+        sessionId,
+        messageId,
+        reviewedBy: user,
+        reviewed: parsed.data.reviewed,
+      });
+      if (!message) {
+        // Either no such message in this session, or it is not an assistant turn. Both are the
+        // caller asking to review something that is not a reviewable assessment.
+        res.status(404).json({ error: 'No reviewable assistant message with that id in this session' });
+        return;
+      }
+
+      await tryAudit(deps, {
+        actor: user,
+        action: 'advisor.message.review',
+        targetType: 'advisor_message',
+        targetId: messageId,
+        detail: { session_id: sessionId, reviewed: parsed.data.reviewed },
+      });
+
+      res.json({ message });
+    } catch (err) {
+      res
+        .status(500)
+        .json({ error: err instanceof Error ? err.message : 'Failed to update review state' });
     }
   });
 

@@ -80,11 +80,16 @@ jobs:
       # scripts/lakebase/apply.sh does `require_cmd python3` and shells out to it to
       # parse the CLI's JSON. On ubuntu-latest python3 is guaranteed; on a bare macOS
       # box /usr/bin/python3 is an Xcode Command Line Tools stub that can prompt or be
-      # missing entirely. Pin a real interpreter so apply.sh cannot exit 127 here.
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
+      # missing entirely. Provide a real interpreter so apply.sh cannot exit 127 here.
+      #
+      # Homebrew, not actions/setup-python: that action hardcodes
+      # /Users/runner/hostedtoolcache on macOS and overwrites RUNNER_TOOL_CACHE
+      # in-process, so it died on `mkdir: /Users/runner: Permission denied` — and it
+      # died at THIS step, before `Apply Lakebase schema`, so the production schema
+      # and grants migrations were not running at all. That is the failure this
+      # replacement fixes; see the action for the upstream source and the sudo issue.
+      - name: Ensure Python
+        uses: ./.github/actions/ensure-python
 
       # This runner is macOS: there is no apt-get, so the previous Debian/pgdg
       # install died here, apply.sh then hit `require_cmd psql` and exited 127, and

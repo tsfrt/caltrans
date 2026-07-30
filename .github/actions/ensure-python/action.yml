@@ -1,0 +1,135 @@
+name: Ensure Python
+description: >-
+  Provision a real python3 on the self-hosted macOS runner via Homebrew, guarded and idempotent.
+  Replaces actions/setup-python, which cannot work on this runner (see the note below). Shared by
+  the ci, deploy-main and preview-up workflows so all three provision Python identically.
+
+runs:
+  using: composite
+  steps:
+    # WHY NOT actions/setup-python@v5 -- it is not a preference, it CANNOT work here.
+    #
+    # 1) It hardcodes the tool cache path on macOS and OVERWRITES whatever the environment set.
+    #    From its src/setup-python.ts, the first statements of run():
+    #
+    #      if (IS_MAC) {
+    #        process.env['AGENT_TOOLSDIRECTORY'] = '/Users/runner/hostedtoolcache';
+    #      }
+    #      if (process.env.AGENT_TOOLSDIRECTORY?.trim()) {
+    #        process.env['RUNNER_TOOL_CACHE'] = process.env['AGENT_TOOLSDIRECTORY'];
+    #      }
+    #
+    #    The assignment is unconditional on macOS and happens BEFORE the read, so it clobbers the
+    #    value rather than defaulting to it -- and then copies it over RUNNER_TOOL_CACHE, which the
+    #    runner had correctly set to /Users/thomas.seufert/gh_runner/_work/_tool. This is verified
+    #    in the compiled dist/setup/index.js at the v5 tag (a26af69), i.e. in the code that
+    #    actually executes, not just on main.
+    #
+    #    On this runner there is no `runner` user and /Users/runner is not writable, so the
+    #    installer's `mkdir -p $TOOLCACHE_ROOT/Python` died with
+    #      ##[error]mkdir: /Users/runner: Permission denied
+    #    and took the whole job with it. Because the path is assigned in-process, NEITHER a
+    #    workflow-level `env:` NOR the runner service's .env can defeat it. There is no
+    #    configuration that fixes this -- hence dropping the action rather than tuning it.
+    #
+    # 2) Even with a writable path it would still fail here. The macOS artifact
+    #    (python-3.12.10-darwin-arm64.tar.gz) ships a setup.sh whose install step is
+    #      sudo installer -pkg python-3.12.10-macos11.pkg ... -target /
+    #    so it requires passwordless sudo and mutates global system state
+    #    (/Library/Frameworks/Python.framework, /Applications/Python 3.12). This runner is not
+    #    assumed to have passwordless sudo, and the psql/jq steps already establish the no-sudo
+    #    rule for exactly that reason.
+    #
+    # setup-node is deliberately NOT changed: it has no such hardcode, honours RUNNER_TOOL_CACHE,
+    # and is observably green on this box ("Found in cache @ .../gh_runner/_work/_tool/node/...").
+    # The asymmetry is entirely setup-python's macOS hardcode.
+    #
+    # Nothing here needs 3.12 specifically: pyproject.toml sets requires-python = ">=3.10" (a
+    # floor, not a pin), ruff targets py310, dependencies are empty, and tools/ is stdlib-only
+    # with no 3.11+/3.12-only syntax. So tracking Homebrew's python@3.12 costs nothing.
+    #
+    # Idempotent and sudo-free, mirroring the libpq/jq steps: the runner is persistent, so on an
+    # already-provisioned box every branch below is a no-op and the step just re-exports PATH
+    # (which MUST happen every run -- $GITHUB_PATH does not persist between jobs).
+    - name: Ensure python3 is available
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        # Resolve brew first: the libexec path is derived from its prefix. brew may be installed
+        # but missing from a non-login shell's PATH, so try the standard prefixes before
+        # concluding it is absent.
+        if ! command -v brew >/dev/null 2>&1; then
+          for candidate in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+            if [ -x "$candidate" ]; then
+              eval "$("$candidate" shellenv)"
+              break
+            fi
+          done
+        fi
+
+        if ! command -v brew >/dev/null 2>&1; then
+          echo "::error title=Runner setup incomplete::Homebrew is not installed on the self-hosted runner 'caltrans', so python3 cannot be installed automatically."
+          echo "Install it once on that machine as the runner user, then re-run:" >&2
+          echo '  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"' >&2
+          echo '  eval "$(/opt/homebrew/bin/brew shellenv)"   # Apple Silicon prefix' >&2
+          echo "  brew install python@3.12" >&2
+          exit 1
+        fi
+
+        # `brew list` rather than `command -v python3`: bare macOS /usr/bin/python3 is an Xcode
+        # Command Line Tools stub that can prompt to install or be missing its interpreter, so a
+        # `command -v python3` hit does NOT prove a usable interpreter exists. Ask brew about the
+        # keg instead. `brew list --versions` exits non-zero when the formula is absent.
+        if brew list --versions python@3.12 >/dev/null 2>&1; then
+          echo "python@3.12 already installed: $(brew list --versions python@3.12)"
+        else
+          echo "Installing python@3.12 via Homebrew..."
+          brew install python@3.12
+        fi
+
+        # python@3.12 is an ALTINSTALL, and this export is mandatory rather than belt-and-braces.
+        # From the formula (homebrew-core Formula/p/python@3.12.rb):
+        #
+        #   def altinstall? = name != Formula["python3"].name
+        #   { "python" => "python3.12", ... }
+        #     .merge(altinstall? ? { "python3" => "python3.12", ... } : {})
+        #     .each { |short, long| (libexec/"bin").install_symlink (bin/long).realpath => short }
+        #
+        # so <prefix>/bin gets ONLY `python3.12`, while BOTH bare `python3` AND bare `python` land
+        # in <prefix>/opt/python@3.12/libexec/bin -- which is not on PATH by default. Without this
+        # export `python3` would fall through to the /usr/bin/python3 CLT stub. Exporting libexec/bin
+        # is the documented caveat path and provides `python3` and `python` together.
+        #
+        # The prefix is READ from `brew --prefix`, never hardcoded: /opt/homebrew on Apple Silicon,
+        # /usr/local on Intel, and it can be custom.
+        PY_LIBEXEC="$(brew --prefix python@3.12)/libexec/bin"
+        if [ ! -x "$PY_LIBEXEC/python3" ]; then
+          echo "::error title=python3 not found after install::brew install python@3.12 succeeded but no python3 was found at $PY_LIBEXEC."
+          echo "Inspect the runner with: brew --prefix python@3.12 && ls \"\$(brew --prefix python@3.12)/libexec/bin\"" >&2
+          exit 1
+        fi
+
+        # Prepend so this interpreter WINS over /usr/bin/python3 (the CLT stub) for every later
+        # step in the job.
+        echo "$PY_LIBEXEC" >>"$GITHUB_PATH"
+        echo "python3 will resolve to: $PY_LIBEXEC/python3"
+
+    # Separate step so the assertion is real: $GITHUB_PATH only takes effect in SUBSEQUENT steps,
+    # so verifying in the installing step above would prove nothing about what later steps see.
+    # Failing loudly here beats `require_cmd python3` exiting a bare 127 mid-migration.
+    - name: Assert python3 is on PATH
+      shell: bash
+      run: |
+        set -euo pipefail
+        if ! command -v python3 >/dev/null 2>&1; then
+          echo "::error title=python3 missing::python3 is not on PATH, so the scenario SQL gate and the lakebase/preview scripts cannot run."
+          echo "On the self-hosted runner 'caltrans', run: brew install python@3.12" >&2
+          echo "PATH was: $PATH" >&2
+          exit 1
+        fi
+        # Prove the interpreter actually RUNS (an Xcode CLT stub resolves but can fail to execute)
+        # and that json is importable, which is all scripts/lakebase/apply.sh needs of it.
+        echo "python3 resolved: $(command -v python3)"
+        python3 --version
+        python3 -c 'import json,sys; print("interpreter OK:", sys.version.split()[0])'

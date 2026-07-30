@@ -204,6 +204,71 @@ checkout, which makes `selfprobe.ts` no-op the probe — the fix the file's own 
 Losing a startup diagnostic on a throwaway preview is a good trade against deploying twice to
 obtain it. Production deploys never call the script and keep the real URL.
 
+## Runner prerequisites
+
+All four workflows run on the self-hosted runner `caltrans` (labels `[self-hosted, macOS, ARM64]`,
+Apple Silicon, persistent, single-job, runner user `thomas.seufert`). `preview-up.yml` points here
+by name, so keep this section in sync with what the workflows actually require.
+
+### A human must install exactly two things
+
+| # | Requirement | Install once | Needed by |
+|---|---|---|---|
+| 1 | **Homebrew** | `/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"` | everything in the next table |
+| 2 | **Xcode Command Line Tools** | `xcode-select --install` | `git` (checkout), and Homebrew itself requires it |
+
+That is the whole manual list. Homebrew must be installed **as the runner user**, not with `sudo` —
+`brew` owns its prefix as the invoking user, and no workflow step uses `sudo` anywhere.
+
+Nothing else needs pre-installing: `psql`, `jq` and `python3` are each provisioned by a guarded,
+idempotent workflow step that installs the formula if absent and then **proves the binary resolves**
+in a separate step. On an already-provisioned box those steps are no-ops that only re-export PATH
+(which must happen every run — `$GITHUB_PATH` does not persist between jobs).
+
+| Provisioned automatically | Formula | Why it is not automatic-by-default |
+|---|---|---|
+| `psql` | `libpq` | keg-only, so brew links nothing onto PATH — the workflow exports `$(brew --prefix)/opt/libpq/bin` |
+| `jq` | `jq` | not keg-only; needs no export |
+| `python3` | `python@3.12` | **altinstall** — `<prefix>/bin` gets only `python3.12`; bare `python3` and `python` live in `$(brew --prefix python@3.12)/libexec/bin`, which the workflow exports |
+
+If Homebrew is missing, every one of those steps fails with an actionable `::error::` naming the
+exact `brew install` to run — they do not fail silently.
+
+### What comes from the actions, with no runner setup
+
+| Tool | Source | Note |
+|---|---|---|
+| `node` / `npm` / `npx` | `actions/setup-node@v4` | Installs into `RUNNER_TOOL_CACHE` under the runner's own `_work/_tool`, so it persists across runs. **No `cache: npm`** — see the note in `ci.yml`. |
+| `databricks` CLI | `databricks/setup-cli@v1.7.0` | Pinned exactly; installs under `$RUNNER_TEMP`, no sudo. |
+| `git`, `curl`, `unzip`, `tar` | stock macOS | Used by `checkout` and `setup-cli`. |
+
+**`actions/setup-python` is deliberately NOT used** and must not be reintroduced. It hardcodes
+`/Users/runner/hostedtoolcache` on macOS and overwrites `RUNNER_TOOL_CACHE` in-process, so on this
+box it fails with `mkdir: /Users/runner: Permission denied` — and no workflow `env:` or runner
+`.env` can override it. It also requires passwordless `sudo` (`sudo installer -pkg`). See
+`.github/actions/ensure-python/action.yml` for the upstream source. `setup-node` has no such
+hardcode, which is why it works.
+
+**`gh` is NOT a runner requirement** — no workflow invokes it. PR comments are posted with
+`actions/github-script`, which runs in the action runtime.
+
+### Bash and userland constraints
+
+`/bin/bash` on macOS is **3.2.57** (Apple ships the last GPLv2 release). Scripts must avoid
+`mapfile`/`readarray`, `declare -A`, `${var,,}`/`${var^^}`, and negative array indices. Userland is
+**BSD**, not GNU: no `sed -i` without an argument, no `date -d`, `readlink -f`, `grep -P`,
+`base64 -w`, GNU `timeout`, `stat -c`, or `sort -V`. There is no `apt-get`.
+
+### Verifying the box by hand
+
+```bash
+brew --version
+git --version
+brew list --versions libpq jq python@3.12
+"$(brew --prefix libpq)/bin/psql" --version
+"$(brew --prefix python@3.12)/libexec/bin/python3" --version
+```
+
 ## Secrets a human must set before the first run
 
 Both are repository (or `preview` environment) secrets:

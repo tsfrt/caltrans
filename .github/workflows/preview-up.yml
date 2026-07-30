@@ -152,13 +152,16 @@ jobs:
       # and uses it to parse the CLI's JSON.
       #
       # Bare macOS /usr/bin/python3 is an Xcode Command Line Tools stub that can prompt to
-      # install or be missing entirely, so pin a real interpreter exactly as deploy-main.yml and
-      # ci.yml already do. actions/python-versions publishes python-3.12.x-darwin-arm64, so this
-      # resolves on Apple Silicon; 3.12 matches the other two workflows deliberately.
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
+      # install or be missing entirely, so provide a real interpreter exactly as deploy-main.yml
+      # and ci.yml already do — all three now share the one composite action, so they cannot
+      # drift apart.
+      #
+      # Homebrew, not actions/setup-python: that action hardcodes /Users/runner/hostedtoolcache on
+      # macOS and overwrites RUNNER_TOOL_CACHE in-process, so on this runner it fails with
+      # `mkdir: /Users/runner: Permission denied` and no env: override can prevent it. This site
+      # had not yet run red only because preview-up needs a PR label to trigger.
+      - name: Ensure Python
+        uses: ./.github/actions/ensure-python
 
       # deploy.sh phase 3 shells out to scripts/lakebase/apply.sh, which hard-requires `psql`
       # (`require_cmd psql` -> exit 127). Without a resolvable psql the grants step dies and the
